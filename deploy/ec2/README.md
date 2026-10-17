@@ -8,6 +8,10 @@ instance is managed through AWS Systems Manager (no SSH keys).
 Why EC2 and not a shared PaaS: Open-Meteo's free tier is limited per IP address, and shared hosting
 IPs (tested on Render) are already over that limit. A dedicated IP keeps the weather fast and free.
 
+Secrets: the optional paid Open-Meteo key lives in SSM Parameter Store as the SecureString
+`/truck-routing/open-meteo-api-key`; `deploy.sh` reads it on each deploy (the instance role may read
+that one parameter only). Without it the app runs on the free tier.
+
 Redeploy after pushing to `main`:
 
 ```bash

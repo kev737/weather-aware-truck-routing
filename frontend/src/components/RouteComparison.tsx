@@ -65,11 +65,12 @@ function Banner({ plan }: { plan: Plan }) {
   }
   const r = plan.routes.find((x) => x.id === rec.route_id)!;
   return (
-    <div className="banner ok">
+    <div className={`banner ${rec.provisional ? "provisional" : "ok"}`}>
       <strong>
-        ★ Route {r.id} · {r.via}
+        {rec.provisional && <span className="tag">Provisional</span>}★ Route {r.id} · {r.via}
       </strong>
       <span>{rec.reason}</span>
+      {rec.provisional && <span className="hint">Some checkpoints are still waiting for weather; this may change.</span>}
     </div>
   );
 }
@@ -82,6 +83,23 @@ function SpacingNote({ plan }: { plan: Plan }) {
       Checkpoints are {plan.interval_mi} mi apart, so storms between them aren't counted. 10 mi is safest for
       thunderstorms.
     </p>
+  );
+}
+
+/**
+ * Weather data warnings from the server: missing stretches, or the daily quota running low.
+ * Gaps that are filling in automatically are explained by the progress line instead.
+ */
+function Warnings({ plan }: { plan: Plan }) {
+  const shown = plan.warnings.filter((w) => !(w.kind === "weather_partial" && w.retry));
+  return (
+    <>
+      {shown.map((w) => (
+        <p key={w.kind + w.message} className={w.kind === "quota_low" ? "note" : "warning"} role="status">
+          {w.message}
+        </p>
+      ))}
+    </>
   );
 }
 
@@ -107,6 +125,7 @@ export function RouteComparison({ routes, plan, selectedId, onSelect }: Props) {
     <section className="results">
       {plan && <Banner plan={plan} />}
       {plan && <LeaveLater plan={plan} />}
+      {plan && <Warnings plan={plan} />}
       <table className="compare">
         <thead>
           <tr>

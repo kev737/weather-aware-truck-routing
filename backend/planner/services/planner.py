@@ -19,8 +19,8 @@ from ..domain.geo import haversine_mi, point_at, simplify
 from ..domain.recommend import RouteScore, explain, rank, score_route, sort_key
 from ..domain.risk import Assessment, assess, risk_index
 from ..domain.route import Route, Sample, distinguishing_names, sample_checkpoints
-from . import geocoding, routing, weather
-from .corridor import pick_grid, with_points
+from . import geocoding, quota, routing, weather
+from .corridor import pick_grid
 from .geocoding import Place
 
 HEATMAP_HOURS = 48
@@ -55,7 +55,7 @@ class TimedCheckpoint:
 
     sample: Sample
     elapsed_s: float  # driving time from departure to this checkpoint
-    cell: weather.Cell  # forecast grid cell
+    cell: weather.Cell  # where its forecast is read: the checkpoint itself, to ~100 m
 
 
 @dataclass(frozen=True)
@@ -70,8 +70,14 @@ class Trip:
     names: dict[str, str]  # what sets each route apart, e.g. "I 40 / I 44"
     trip_s: dict[str, float]  # departure to arrival
     timed: dict[str, list[TimedCheckpoint]]
-    cell_deg: float
-    cells: frozenset[weather.Cell]
+    heat_deg: float  # heatmap grid size
+    heat_cells: frozenset[weather.Cell]  # heatmap grid along the routes
+    points: frozenset[weather.Cell]  # every checkpoint's exact location
+
+    @property
+    def locations(self) -> frozenset[weather.Cell]:
+        """Everything to download: the checkpoints and the heatmap grid."""
+        return self.points | self.heat_cells
 
     @property
     def weather_start(self) -> datetime:
@@ -87,10 +93,9 @@ class Trip:
 # --- Step 1: routes ---------------------------------------------------------
 
 
-def _timed(route: Route, interval_mi: int, cell_deg: float) -> list[TimedCheckpoint]:
-    return [
-        TimedCheckpoint(s, s.seconds, weather.snap(s.point, cell_deg)) for s in sample_checkpoints(route, interval_mi)
-    ]
+def _timed(route: Route, interval_mi: int) -> list[TimedCheckpoint]:
+    """Checkpoints every `interval_mi`, each read at its own location (the spec's sampling)."""
+    return [TimedCheckpoint(s, s.seconds, weather.exact(s.point)) for s in sample_checkpoints(route, interval_mi)]
 
 
 def create_trip(req: TripRequest) -> tuple[Trip, dict]:
@@ -104,13 +109,13 @@ def create_trip(req: TripRequest) -> tuple[Trip, dict]:
     found = routing.truck_routes((origin.lat, origin.lon), (dest.lat, dest.lon), req.load_lb, req.departure)
     routes = dict(zip(ROUTE_LETTERS, found))
     trip_s = {rid: r.duration_s for rid, r in routes.items()}
-    cell_deg, cells = pick_grid(list(routes.values()))
-    timed = {rid: _timed(r, req.interval_mi, cell_deg) for rid, r in routes.items()}
-    cells = with_points(cells, (t.sample.point for cps in timed.values() for t in cps), cell_deg)
+    timed = {rid: _timed(r, req.interval_mi) for rid, r in routes.items()}
+    points = frozenset(t.cell for cps in timed.values() for t in cps)
+    heat_deg, heat_cells = pick_grid(list(routes.values()))
 
     names = dict(zip(routes, distinguishing_names(list(routes.values()))))
     trip = Trip(
-        uuid.uuid4().hex, req, origin, dest, routes, names, trip_s, timed, cell_deg, frozenset(cells)
+        uuid.uuid4().hex, req, origin, dest, routes, names, trip_s, timed, heat_deg, frozenset(heat_cells), points
     )
     cache.set(f"trip:{trip.id}", trip, TRIP_CACHE_S)
     return trip, _trip_summary(trip)
@@ -152,8 +157,8 @@ def _trip_summary(trip: Trip) -> dict:
         "interval_mi": trip.req.interval_mi,
         "routes": [_route_summary(trip, rid) for rid in trip.routes],
         "weather": {
-            "points": len(trip.cells),
-            "estimated_s": weather.estimate_seconds(set(trip.cells), trip.weather_start, trip.weather_hours),
+            "points": len(trip.locations),
+            "estimated_s": weather.estimate_seconds(set(trip.locations), trip.weather_start, trip.weather_hours),
         },
     }
 
@@ -297,7 +302,7 @@ def _departure_window(trip: Trip, table: RiskTable) -> dict | None:
 def _heatmap(trip: Trip, table: RiskTable) -> dict:
     """Risk index (0-4) per cell for each hour 0..48 after departure (None = no data)."""
     dep = trip.req.departure
-    ordered = sorted(trip.cells)
+    ordered = sorted(trip.heat_cells)
     values = []
     for cell in ordered:
         row = []
@@ -307,32 +312,74 @@ def _heatmap(trip: Trip, table: RiskTable) -> dict:
         values.append(row)
     return {
         "hours": [(dep + timedelta(hours=h)).isoformat() for h in range(HEATMAP_HOURS + 1)],
-        "cell_deg": trip.cell_deg,
+        "cell_deg": trip.heat_deg,
         "points": [[lon, lat] for lat, lon in ordered],
         "values": values,
     }
 
 
 def _warnings(trip: Trip, result: weather.WeatherResult) -> list[dict]:
-    if not result.missing:
-        return []
-    why = "the free weather service's rate limit" if result.rate_limited else "a weather service error"
-    return [
-        {
-            "kind": "weather_partial",
-            "missing_points": len(result.missing),
-            "total_points": len(trip.cells),
-            "rate_limited": result.rate_limited,
-            "message": (
-                f"Weather is missing for {len(result.missing)} of {len(trip.cells)} points because of {why}. "
-                "Those stretches are grey and count against a route. Try again in about a minute for full data."
-            ),
-        }
-    ]
+    warnings = []
+    if result.deferred:
+        n, wait = len(result.deferred), result.retry_after_s
+        checkpoints_waiting = len(result.deferred & trip.points)
+        if checkpoints_waiting:
+            what = (
+                f"Weather for {n} more points arrives in about {wait} s: the free weather service allows "
+                "600 lookups a minute. Until then those stretches are grey and the recommendation is provisional."
+            )
+        else:  # every checkpoint is in: the recommendation is final, only the heatmap is filling in
+            what = (
+                f"The heatmap's last {n} points arrive in about {wait} s (the free weather service allows "
+                "600 lookups a minute). The recommendation is final."
+            )
+        warnings.append(
+            {
+                "kind": "weather_partial",
+                "missing_points": n,
+                "checkpoints_waiting": checkpoints_waiting,
+                "total_points": len(trip.locations),
+                "rate_limited": True,
+                "retry": True,
+                "retry_after_s": wait,
+                "message": what,
+            }
+        )
+    if result.missing:
+        if result.quota_exhausted:
+            why, then = "today's free weather quota running out", "Try again tomorrow for full data."
+        elif result.rate_limited:
+            why, then = "the free weather service's rate limit", "Filling in the rest automatically."
+        else:
+            why, then = "a weather service error", "Try again in a minute for full data."
+        warnings.append(
+            {
+                "kind": "weather_partial",
+                "missing_points": len(result.missing),
+                "total_points": len(trip.locations),
+                "rate_limited": result.rate_limited,
+                "retry": result.rate_limited and not result.quota_exhausted,
+                "message": (
+                    f"Weather is missing for {len(result.missing)} of {len(trip.locations)} points because of {why}. "
+                    f"Those stretches are grey and count against a route. {then}"
+                ),
+            }
+        )
+    usage = quota.status()
+    if usage["near_daily_limit"] and not result.quota_exhausted:
+        warnings.append(
+            {
+                "kind": "quota_low",
+                "message": f"Today's free weather quota is {usage['day']['pct']}% used; it resets tomorrow.",
+            }
+        )
+    return warnings
 
 
 def plan_trip(trip: Trip) -> dict:
-    result = weather.forecasts(set(trip.cells), trip.weather_start, trip.weather_hours)
+    # Checkpoints first (they decide the ranking), route by route along the road; the heatmap last.
+    priority = [t.cell for rid in trip.routes for t in trip.timed[rid]]
+    result = weather.forecasts(set(trip.locations), trip.weather_start, trip.weather_hours, priority)
     table = RiskTable(result.forecasts, trip.weather_start, trip.req.load_lb)
     dep = trip.req.departure
 
@@ -354,6 +401,8 @@ def plan_trip(trip: Trip) -> dict:
     ranked = rank(scores)
     best = ranked[0]
     no_safe_route = best.no_travel_mi > 0
+    checkpoint_cells = {t.cell for cps in trip.timed.values() for t in cps}
+    provisional = bool((result.missing | result.deferred) & checkpoint_cells)
     for r in routes:
         r["rank"] = next(i for i, s in enumerate(ranked) if s.route_id == r["id"]) + 1
         r["recommended"] = r["id"] == best.route_id and not no_safe_route
@@ -365,8 +414,10 @@ def plan_trip(trip: Trip) -> dict:
             "route_id": None if no_safe_route else best.route_id,
             "reason": explain(best, ranked[1] if len(ranked) > 1 else None),
             "no_safe_route": no_safe_route,
+            "provisional": provisional,  # some checkpoints still have no forecast
         },
         "best_window": _departure_window(trip, table),
         "heatmap": _heatmap(trip, table),
         "warnings": _warnings(trip, result),
+        "quota": quota.status(),
     }

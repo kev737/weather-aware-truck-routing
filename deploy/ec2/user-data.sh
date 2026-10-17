@@ -25,21 +25,12 @@ CADDY
 [ -f /opt/app.env ] || printf 'DJANGO_SECRET_KEY=%s\nDJANGO_ALLOWED_HOSTS=%s,localhost\n' "$(openssl rand -hex 32)" "$SITE" > /opt/app.env
 chmod 600 /opt/app.env
 
+# /opt/deploy.sh pulls main and runs the versioned script in the repo.
 cat > /opt/deploy.sh <<'DEPLOY'
 #!/bin/bash
-# Pull the latest main, rebuild, and swap the app container (Caddy keeps serving).
-set -euxo pipefail
+set -euo pipefail
 cd /opt/app && git fetch -q origin && git reset -q --hard origin/main
-docker build -t truck-routing /opt/app
-docker network inspect web >/dev/null 2>&1 || docker network create web
-docker rm -f app >/dev/null 2>&1 || true
-docker run -d --name app --network web --restart unless-stopped --env-file /opt/app.env truck-routing
-if ! docker ps --format '{{.Names}}' | grep -q '^caddy$'; then
-  docker rm -f caddy >/dev/null 2>&1 || true
-  docker run -d --name caddy --network web --restart unless-stopped -p 80:80 -p 443:443 \
-    -v /opt/caddy/Caddyfile:/etc/caddy/Caddyfile:ro -v caddy_data:/data -v caddy_config:/config caddy:2.10-alpine
-fi
-docker image prune -f
+exec /opt/app/deploy/ec2/deploy.sh
 DEPLOY
 chmod +x /opt/deploy.sh
 /opt/deploy.sh

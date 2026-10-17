@@ -27,17 +27,22 @@ export function Progress({ phase, estimatedS, startedAt, retry, onRetryNow }: Pr
 
   if (retry) {
     const left = Math.max(0, Math.ceil((retry.at - now) / 1000));
+    const what = retry.missing ? `weather for ${retry.missing} more points` : "the weather";
     return (
       <div className="progress" role="status">
         <p>
-          Weather service is busy
-          {retry.missing ? `, filling in ${retry.missing} missing points` : ""}. Retrying in {left} s (attempt{" "}
-          {retry.attempt} of {retry.of}).
+          {left > 0 ? `Fetching ${what} in ${left} s` : `Fetching ${what} now…`}
+          {retry.attempt > 1 ? ` (attempt ${retry.attempt} of ${retry.of})` : ""}
         </p>
-        <p className="hint">Everything else is ready to use. The rest fills in automatically.</p>
-        <button type="button" className="link" onClick={onRetryNow}>
-          Retry now
-        </button>
+        {left === 0 && <div className="bar indeterminate" />}
+        {retry.message && <p className="hint">{retry.message}</p>}
+        <p className="hint">Everything else is ready to use; the rest fills in automatically.</p>
+        {/* A paced wait ends when the quota frees up; only a failure is worth retrying early. */}
+        {!retry.paced && (
+          <button type="button" className="link" onClick={onRetryNow}>
+            Retry now
+          </button>
+        )}
       </div>
     );
   }

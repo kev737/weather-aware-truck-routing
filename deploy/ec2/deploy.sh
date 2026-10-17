@@ -1,0 +1,28 @@
+#!/bin/bash
+# Rebuild and restart the app on the EC2 host (run by /opt/deploy.sh after a git pull).
+# Secrets never live in git: the Open-Meteo key is read from SSM Parameter Store.
+set -euo pipefail
+PARAM=/truck-routing/open-meteo-api-key
+REGION=$(TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 60") \
+  && curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region)
+
+# Refresh the key line in the env file (empty if the parameter doesn't exist: free tier).
+KEY=$(aws ssm get-parameter --region "$REGION" --name "$PARAM" --with-decryption \
+  --query Parameter.Value --output text 2>/dev/null || true)
+grep -v '^OPEN_METEO_API_KEY=' /opt/app.env > /opt/app.env.new || true
+[ -n "$KEY" ] && echo "OPEN_METEO_API_KEY=$KEY" >> /opt/app.env.new
+mv /opt/app.env.new /opt/app.env && chmod 600 /opt/app.env
+echo "weather tier: $([ -n "$KEY" ] && echo paid || echo free)"
+
+docker build -t truck-routing /opt/app
+docker network inspect web >/dev/null 2>&1 || docker network create web
+docker rm -f app >/dev/null 2>&1 || true
+# The cache volume keeps forecasts, trips and the weather-quota count across deploys.
+docker run -d --name app --network web --restart unless-stopped --env-file /opt/app.env \
+  -v truck_cache:/tmp/truck-routing-cache truck-routing
+if ! docker ps --format '{{.Names}}' | grep -q '^caddy$'; then
+  docker rm -f caddy >/dev/null 2>&1 || true
+  docker run -d --name caddy --network web --restart unless-stopped -p 80:80 -p 443:443 \
+    -v /opt/caddy/Caddyfile:/etc/caddy/Caddyfile:ro -v caddy_data:/data -v caddy_config:/config caddy:2.10-alpine
+fi
+docker image prune -f

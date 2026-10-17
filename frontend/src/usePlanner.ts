@@ -9,10 +9,12 @@ const MAX_RETRIES = 5;
 export type Phase = "idle" | "routing" | "weather" | "done";
 
 export interface Retry {
-  attempt: number; // 1-based
+  attempt: number; // 1-based; only goes up when a round made no progress
   of: number;
   at: number; // epoch ms of the next attempt
   missing: number | null; // points still missing, if known
+  message: string | null; // the server's explanation
+  paced: boolean; // waiting on the free tier's per-minute quota: retrying early can't help
 }
 
 export interface PlannerState {
@@ -36,7 +38,12 @@ const initial: PlannerState = {
 };
 
 function readyNotice(plan: Plan, partial: boolean, wasRetry: boolean): string {
-  if (partial) return "Weather partly loaded. Filling in the rest automatically.";
+  const gap = plan.warnings.find((w) => w.kind === "weather_partial");
+  if (partial && gap?.kind === "weather_partial") {
+    return gap.retry
+      ? "Weather partly loaded. Filling in the rest automatically."
+      : "Weather partly loaded: today's free weather quota is used up.";
+  }
   const rec = plan.recommendation;
   const head = wasRetry ? "All weather data loaded." : "Weather loaded.";
   if (rec.no_safe_route) return `${head} No route is safe at your departure time; see the suggestion.`;
@@ -67,17 +74,31 @@ export function usePlanner() {
   };
   useEffect(() => cancel, []);
 
-  const fetchPlan = useCallback(async (tripId: string, attempt: number, runId: number) => {
+  const fetchPlan = useCallback(async (tripId: string, attempt: number, runId: number, lastMissing?: number) => {
     const ctrl = new AbortController();
     controller.current = ctrl;
-    const scheduleRetry = (retryAfterS: number | undefined, missing: number | null, error: string | null) => {
-      if (attempt > MAX_RETRIES) {
-        setState((s) => ({ ...s, phase: s.plan ? "done" : "idle", retry: null, error }));
+    const scheduleRetry = (retryAfterS: number | undefined, missing: number | null, message: string | null) => {
+      // A round that filled in more points (the first one always does) doesn't use up an
+      // attempt: long trips on the free tier take a few paced rounds, and that's progress.
+      const progressed = missing !== null && (lastMissing === undefined || missing < lastMissing);
+      const next = progressed ? attempt : attempt + 1;
+      if (next > MAX_RETRIES + 1) {
+        setState((s) => ({ ...s, phase: s.plan ? "done" : "idle", retry: null, error: message }));
         return;
       }
       const wait = backoffSeconds(attempt, retryAfterS);
-      setState((s) => ({ ...s, retry: { attempt, of: MAX_RETRIES, at: Date.now() + wait * 1000, missing } }));
-      timer.current = setTimeout(() => fetchPlan(tripId, attempt + 1, runId), wait * 1000);
+      setState((s) => ({
+        ...s,
+        retry: {
+          attempt: next,
+          of: MAX_RETRIES,
+          at: Date.now() + wait * 1000,
+          missing,
+          message,
+          paced: retryAfterS !== undefined,
+        },
+      }));
+      timer.current = setTimeout(() => fetchPlan(tripId, next, runId, missing ?? undefined), wait * 1000);
     };
 
     try {
@@ -86,11 +107,14 @@ export function usePlanner() {
       const partial = plan.warnings.find((w) => w.kind === "weather_partial");
       const notice = readyNotice(plan, Boolean(partial), attempt > 1);
       setState((s) => ({ ...s, phase: "done", plan, retry: null, error: null, notice }));
-      if (partial) scheduleRetry(undefined, partial.missing_points, partial.message);
+      // Retry only when it can help: not when today's quota is used up.
+      if (partial?.kind === "weather_partial" && partial.retry) {
+        scheduleRetry(partial.retry_after_s, partial.missing_points, partial.message);
+      }
     } catch (e) {
       if (run.current !== runId || ctrl.signal.aborted) return;
       const err = e as ApiError;
-      if (err.status === 503) scheduleRetry(err.retryAfterS, null, err.message);
+      if (err.status === 503 && !err.quotaExhausted) scheduleRetry(err.retryAfterS, null, err.message);
       else setState((s) => ({ ...s, phase: s.plan ? "done" : "idle", retry: null, error: err.message }));
     }
   }, []);

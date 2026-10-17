@@ -36,6 +36,7 @@ LB_PER_TONNE = 2204.62
 # The public server's limit is 1,500 km of straight-line distance per request; stay under it.
 MAX_REQUEST_MI = 800
 SPLIT_EVERY_MI = 600  # road miles between split points on a long trip
+CHUNK_WORKERS = 4  # parallel leg requests; modest, it's a free public server
 
 # An alternative is only worth showing if most of it is on different roads and it isn't absurdly long.
 MAX_SHARED_FRACTION = 0.85
@@ -198,12 +199,15 @@ def request_routes(
             path.extend(trip)
             routes.append(path.to_route())
         return routes
+    # The legs don't depend on each other: fetch them in parallel, then join in order.
+    with ThreadPoolExecutor(max_workers=CHUNK_WORKERS) as pool:
+        trips = list(pool.map(lambda c: _post(c, load_lb, 0, _near_chunk(list(avoid), c))[0], chunks))
     path = _Path()
     joints = []
-    for chunk in chunks:
+    for trip in trips:
         if path.coords:
             joints.append(len(path.coords) - 1)
-        path.extend(_post(chunk, load_lb, 0, _near_chunk(list(avoid), chunk))[0])
+        path.extend(trip)
     return [remove_spurs(path.to_route(), joints)]
 
 
@@ -327,39 +331,41 @@ def _first_routes(origin: LatLon, dest: LatLon, load_lb: float) -> tuple[list[Ro
 def _distinct_routes(origin: LatLon, dest: LatLon, load_lb: float) -> list[Route]:
     """The main route plus the two most different reasonable alternatives.
 
-    Candidates come from the engine's own alternates, then penalty rounds (run in
-    parallel; each avoids a different stretch). We keep candidates that are mostly
+    Candidates come from the engine's own alternates, then penalty rounds (each
+    avoids a different stretch), one round at a time until three routes are mostly
     on different roads and at most 1.5x slower. If the road network doesn't allow
-    three of those (e.g. one interstate through the mountains), the third slot gets
-    the least-overlapping candidate up to 2x slower, so there are always three.
+    that (e.g. one interstate through the mountains), the third slot gets the
+    least-overlapping candidate up to 2x slower, so there are always three.
     """
     routes, waypoints = _first_routes(origin, dest, load_lb)
     main = routes[0]
-    candidates = list(routes[1:])
-
-    def penalty_round(round_: tuple[tuple[float, float], int]) -> Route | None:
-        span, per_route = round_
-        try:
-            return request_routes(waypoints, load_lb, 0, avoid=_avoid_points(routes, span, per_route))[0]
-        except UpstreamError:
-            return None  # e.g. no truck-legal way around those points
-
-    if len(routes) < ROUTE_COUNT:
-        with ThreadPoolExecutor(max_workers=2) as pool:  # gentle on the free public server
-            candidates += [r for r in pool.map(penalty_round, AVOID_ROUNDS) if r is not None]
-
     chosen = [main]
-    for c in candidates:
-        if (
-            len(chosen) < ROUTE_COUNT
-            and c.duration_s <= main.duration_s * MAX_ALTERNATIVE_TIME_RATIO
-            and overlap(c, chosen) <= MAX_SHARED_FRACTION
+    pool: list[Route] = []  # reasonable but not different enough, for the fill step
+
+    def consider(candidate: Route) -> None:
+        if len(chosen) >= ROUTE_COUNT or candidate.duration_s > main.duration_s * MAX_FILL_TIME_RATIO:
+            return
+        if candidate.duration_s <= main.duration_s * MAX_ALTERNATIVE_TIME_RATIO and (
+            overlap(candidate, chosen) <= MAX_SHARED_FRACTION
         ):
-            chosen.append(c)
-    fill = [c for c in candidates if c not in chosen and c.duration_s <= main.duration_s * MAX_FILL_TIME_RATIO]
-    while len(chosen) < ROUTE_COUNT and fill:
-        fill.sort(key=lambda r: overlap(r, chosen))
-        best = fill.pop(0)
+            chosen.append(candidate)
+        else:
+            pool.append(candidate)
+
+    for alt in routes[1:]:
+        consider(alt)
+    for span, per_route in AVOID_ROUNDS:
+        if len(chosen) >= ROUTE_COUNT:
+            break  # usually after the first round
+        try:
+            found = request_routes(waypoints, load_lb, 0, avoid=_avoid_points(routes, span, per_route))
+        except UpstreamError:
+            continue  # e.g. no truck-legal way around those points
+        consider(found[0])
+
+    while len(chosen) < ROUTE_COUNT and pool:
+        pool.sort(key=lambda r: overlap(r, chosen))
+        best = pool.pop(0)
         if overlap(best, chosen) < 0.995:  # skip exact duplicates
             chosen.append(best)
     return chosen

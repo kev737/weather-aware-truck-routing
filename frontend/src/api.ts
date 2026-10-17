@@ -77,18 +77,23 @@ export interface Trip {
   weather: { points: number; estimated_s: number };
 }
 
-export interface Warning {
-  kind: "weather_partial";
-  missing_points: number;
-  total_points: number;
-  rate_limited: boolean;
-  message: string;
-}
+export type Warning =
+  | {
+      kind: "weather_partial";
+      missing_points: number;
+      checkpoints_waiting?: number; // 0 = the recommendation is final, only the heatmap is filling in
+      total_points: number;
+      rate_limited: boolean;
+      retry: boolean; // false when retrying soon can't help (daily quota)
+      retry_after_s?: number; // when the rest can be fetched (the free tier's per-minute pacing)
+      message: string;
+    }
+  | { kind: "quota_low"; message: string };
 
 export interface Plan extends Omit<Trip, "routes"> {
   routes: RouteOption[];
   warnings: Warning[];
-  recommendation: { route_id: string | null; reason: string; no_safe_route: boolean };
+  recommendation: { route_id: string | null; reason: string; no_safe_route: boolean; provisional: boolean };
   best_window: BestWindow | null;
   heatmap: Heatmap;
 }
@@ -104,11 +109,13 @@ export interface PlanRequest {
 export class ApiError extends Error {
   readonly status: number; // 0 = network error
   readonly retryAfterS?: number; // set when the server says to wait (rate limit)
+  readonly quotaExhausted: boolean; // daily quota used up: don't retry today
 
-  constructor(message: string, status: number, retryAfterS?: number) {
+  constructor(message: string, status: number, retryAfterS?: number, quotaExhausted = false) {
     super(message);
     this.status = status;
     this.retryAfterS = retryAfterS;
+    this.quotaExhausted = quotaExhausted;
   }
 }
 
@@ -131,7 +138,7 @@ async function call<T>(url: string, init?: RequestInit): Promise<T> {
     throw new ApiError("Can't reach the server. Check your connection and try again.", 0);
   }
   const body = await resp.json().catch(() => null);
-  if (!resp.ok) throw new ApiError(describe(body), resp.status, body?.retry_after_s);
+  if (!resp.ok) throw new ApiError(describe(body), resp.status, body?.retry_after_s, Boolean(body?.quota_exhausted));
   return body as T;
 }
 

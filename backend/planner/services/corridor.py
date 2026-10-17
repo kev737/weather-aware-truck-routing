@@ -1,19 +1,19 @@
-"""Which forecast grid cells to download for a trip.
+"""The heatmap's forecast grid: the cells the routes pass through.
 
-One set of cells serves both the checkpoints and the 0-48 h heatmap: the cells
-the routes pass through, sampled every few miles. The free weather API allows
-about 600 locations a minute, so the grid gets coarser on very long trips.
+The finest grid that fits the budget is used (7 mi on most trips). On the free
+weather tier the budget is small, so very long trips get a coarser heatmap; a paid
+key raises it (HEATMAP_MAX_CELLS). Checkpoints don't use this grid: they're read
+at their own locations.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from django.conf import settings
 
-from ..domain.geo import LatLon, point_at
+from ..domain.geo import point_at
 from ..domain.route import Route
 from .weather import Cell, snap
 
-CELL_SIZES_DEG = (0.1, 0.15, 0.2, 0.3)  # 0.1 deg is ~7 mi, finer than the 10 mi checkpoint spacing
-MAX_CELLS = 500
+CELL_SIZES_DEG = (0.1, 0.15, 0.2, 0.3)  # 0.1 deg is ~7 mi
 SAMPLE_STEP_MI = 5  # under a cell's width, so no cell along the road is skipped
 
 
@@ -32,11 +32,6 @@ def pick_grid(routes: list[Route]) -> tuple[float, set[Cell]]:
     """The finest grid that keeps the download under the budget, and its cells."""
     for size in CELL_SIZES_DEG:
         cells = route_cells(routes, size)
-        if len(cells) <= MAX_CELLS:
+        if len(cells) <= settings.HEATMAP_MAX_CELLS:
             return size, cells
     return size, cells
-
-
-def with_points(cells: set[Cell], points: Iterable[LatLon], cell_deg: float) -> set[Cell]:
-    """Add the cells of specific points (the checkpoints) in case sampling missed one."""
-    return cells | {snap(p, cell_deg) for p in points}

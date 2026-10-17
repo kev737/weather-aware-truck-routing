@@ -15,7 +15,11 @@ class UpstreamError(Exception):
 
 
 class RateLimited(UpstreamError):
-    """The provider asked us to slow down (HTTP 429)."""
+    """The provider asked us to slow down (HTTP 429), or our own pacing did."""
+
+    def __init__(self, service: str, message: str, retry_after_s: int | None = None):
+        super().__init__(service, message)
+        self.retry_after_s = retry_after_s
 
 
 def session() -> requests.Session:
@@ -39,7 +43,11 @@ def _request(s: requests.Session, service: str, method: str, url: str, **kwargs)
     except requests.RequestException as exc:
         raise UpstreamError(service, f"request failed ({exc.__class__.__name__})") from exc
     if resp.status_code == 429:
-        raise RateLimited(service, "the free tier's rate limit was reached, try again in about a minute")
+        try:
+            reason = _error_detail(resp.json())  # e.g. Open-Meteo says which limit was hit
+        except ValueError:
+            reason = None
+        raise RateLimited(service, reason or "the free tier's rate limit was reached, try again in about a minute")
     try:
         data = resp.json()
     except ValueError as exc:

@@ -105,8 +105,21 @@ HTTP_TIMEOUT_S = float(os.environ.get("HTTP_TIMEOUT_S", "20"))
 VALHALLA_URL = os.environ.get("VALHALLA_URL", "https://valhalla1.openstreetmap.de")
 OSRM_URL = os.environ.get("OSRM_URL", "https://router.project-osrm.org")  # split points for long trips
 PHOTON_URL = os.environ.get("PHOTON_URL", "https://photon.komoot.io/api/")
-# With a paid Open-Meteo key (no rate limit), point this at customer-api.open-meteo.com.
-OPEN_METEO_URL = os.environ.get("OPEN_METEO_URL", "https://api.open-meteo.com/v1/forecast")
+# Open-Meteo: the free tier works with no key; a paid key (API Standard: 1M calls a
+# month, no per-minute/hour/day limits) uses the customer endpoint.
 OPEN_METEO_API_KEY = os.environ.get("OPEN_METEO_API_KEY", "")
+PAID_WEATHER = bool(OPEN_METEO_API_KEY)
+OPEN_METEO_URL = os.environ.get(
+    "OPEN_METEO_URL",
+    "https://customer-api.open-meteo.com/v1/forecast" if PAID_WEATHER else "https://api.open-meteo.com/v1/forecast",
+)
+# Limits our own counter enforces (open-meteo.com/en/terms and /en/pricing).
+OPEN_METEO_LIMITS = {
+    "minute": int(os.environ.get("OPEN_METEO_LIMIT_MINUTE", 1_000_000 if PAID_WEATHER else 600)),
+    "hour": int(os.environ.get("OPEN_METEO_LIMIT_HOUR", 1_000_000 if PAID_WEATHER else 5_000)),
+    # Free: "less than 10,000", keep a margin. Paid: 1M a month spread over ~30 days.
+    "day": int(os.environ.get("OPEN_METEO_LIMIT_DAY", 33_000 if PAID_WEATHER else 9_500)),
+}
+HEATMAP_MAX_CELLS = int(os.environ.get("HEATMAP_MAX_CELLS", 1_500 if PAID_WEATHER else 500))
 WEATHER_CACHE_S = 30 * 60  # forecasts update hourly
 GEOCODE_CACHE_S = 7 * 24 * 3600

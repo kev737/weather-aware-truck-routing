@@ -105,15 +105,26 @@ straight line between the cities once sent a truck over a mountain pass full of 
 
 - [Open-Meteo](https://open-meteo.com/) hourly forecast: in the US it serves NOAA's HRRR (3 km,
   hourly) for about the first 43 hours, then GFS.
-- Checkpoints are snapped to a grid (0.1°, coarser on very long trips), so nearby points share one
-  forecast, overlapping routes reuse each other's data, and one download serves every route, every
+- Each checkpoint's forecast is fetched **at that checkpoint** (rounded to ~100 m, so overlapping
+  routes share a lookup) and read at the truck's ETA: the brief's sampling, literally. The heatmap
+  uses its own grid along the routes (7 mi on most trips). One download serves every route, every
   departure time and the heatmap.
+- On the free tier (600 lookups a minute) the server paces itself: it fetches checkpoints first, in
+  route order, then the heatmap, only as many as this minute allows, and says when the rest can be
+  fetched. The browser asks again at that moment; until every checkpoint has its forecast the
+  recommendation is marked provisional. A cross-country trip at 10 mi (~1,250 lookups) completes in
+  about two to three minutes; regional trips in seconds. A paid Open-Meteo key (read from AWS
+  Parameter Store at deploy time) would remove the pacing.
 - Each forecast cell is cached for 30 minutes. If the free tier's rate limit cuts a download
   short, the plan comes back with what arrived, missing stretches shown in grey. The browser then
   retries with exponential backoff (5, 10, 20, 40, 60 s), and each retry only fetches what's still
   missing.
 - Each (cell, hour) risk is computed once and reused for every route and departure time that
   needs it.
+- The server counts what it downloads against Open-Meteo's free tier (600 a minute, 5,000 an hour,
+  under 10,000 a day per IP; see `/api/usage/`). Past 80% of the day the app says so; a download
+  that would cross the daily limit isn't attempted, and the app asks to try again tomorrow instead
+  of retrying.
 
 ### Heatmap performance
 

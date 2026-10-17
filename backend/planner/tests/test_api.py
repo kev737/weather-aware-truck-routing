@@ -48,7 +48,7 @@ class FakeForecast:
 def fakes(monkeypatch):
     monkeypatch.setattr("planner.services.geocoding.resolve", fake_resolve)
     monkeypatch.setattr(routing, "truck_routes", lambda o, d, load, dep: ROUTES)
-    monkeypatch.setattr(weather, "forecasts", lambda cells, start, hours: result({c: FakeForecast(c) for c in cells}))
+    monkeypatch.setattr(weather, "forecasts", lambda cells, start, hours, priority=None: result({c: FakeForecast(c) for c in cells}))
 
 
 def body(**overrides):
@@ -147,7 +147,7 @@ class PassingStorm:
 
 def storm_until(monkeypatch, departure, hours):
     ends = departure + timedelta(hours=hours)
-    monkeypatch.setattr(weather, "forecasts", lambda cells, start, h: result({c: PassingStorm(start, ends) for c in cells}))
+    monkeypatch.setattr(weather, "forecasts", lambda cells, start, h, priority=None: result({c: PassingStorm(start, ends) for c in cells}))
 
 
 def test_waiting_out_a_storm_is_suggested(monkeypatch, fakes):
@@ -188,7 +188,7 @@ def test_unknown_trip_is_404(fakes):
 
 
 def test_partial_weather_is_reported_and_never_helps_a_route(monkeypatch, fakes):
-    def partial(cells, start, hours):
+    def partial(cells, start, hours, priority=None):
         # Route C (north-west) loses its weather; the storm in FakeForecast hits A and B.
         missing = {c for c in cells if c[1] < -100.2}
         return result({c: FakeForecast(c) for c in cells if c not in missing}, missing, rate_limited=True)
@@ -231,3 +231,57 @@ def test_unroutable_places_are_a_clear_400(monkeypatch, fakes):
     resp = APIClient().post("/api/trips/", body(destination="Honolulu, HI"), format="json")
     assert resp.status_code == 400
     assert "across water" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("interval", [10, 25, 50])
+def test_checkpoints_are_read_at_their_own_location(monkeypatch, fakes, interval):
+    """The spec's sampling: each checkpoint's forecast is fetched at that checkpoint, not a grid cell."""
+    asked: set = set()
+
+    def record(cells, start, hours, priority=None):
+        asked.update(cells)
+        return result({c: FakeForecast(c) for c in cells})
+
+    monkeypatch.setattr(weather, "forecasts", record)
+    data = post(body(interval_mi=interval)).json()
+    for cp in data["routes"][0]["checkpoints"]:
+        assert (round(cp["lat"], 3), round(cp["lon"], 3)) in asked
+
+
+def test_deferred_weather_makes_the_recommendation_provisional(monkeypatch, fakes):
+    def last_checkpoint_later(cells, start, hours, priority=None):
+        later = {priority[-1]}  # the last checkpoint didn't fit in this minute's budget
+        return weather.WeatherResult(
+            {c: FakeForecast(c) for c in cells - later}, frozenset(), True, deferred=frozenset(later), retry_after_s=37
+        )
+
+    monkeypatch.setattr(weather, "forecasts", last_checkpoint_later)
+    data = post(body()).json()
+    assert data["recommendation"]["provisional"] is True
+    w = next(w for w in data["warnings"] if w["kind"] == "weather_partial")
+    assert w["retry"] is True and w["retry_after_s"] == 37
+    assert "arrives in about 37 s" in w["message"]
+
+
+def test_deferring_only_heatmap_cells_keeps_the_recommendation_final(monkeypatch, fakes):
+    def heat_later(cells, start, hours, priority=None):
+        later = set(cells) - set(priority)  # every checkpoint arrived; only heatmap cells wait
+        return weather.WeatherResult(
+            {c: FakeForecast(c) for c in set(priority)}, frozenset(), True, deferred=frozenset(later), retry_after_s=20
+        )
+
+    monkeypatch.setattr(weather, "forecasts", heat_later)
+    assert post(body()).json()["recommendation"]["provisional"] is False
+
+
+def test_heatmap_only_wait_says_the_recommendation_is_final(monkeypatch, fakes):
+    def heat_later(cells, start, hours, priority=None):
+        later = set(cells) - set(priority)
+        return weather.WeatherResult(
+            {c: FakeForecast(c) for c in set(priority)}, frozenset(), True, deferred=frozenset(later), retry_after_s=20
+        )
+
+    monkeypatch.setattr(weather, "forecasts", heat_later)
+    w = next(w for w in post(body()).json()["warnings"] if w["kind"] == "weather_partial")
+    assert w["checkpoints_waiting"] == 0
+    assert "recommendation is final" in w["message"] and "provisional" not in w["message"]

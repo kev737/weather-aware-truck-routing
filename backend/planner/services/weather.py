@@ -1,9 +1,9 @@
-"""Hourly forecasts from Open-Meteo (no API key, many locations per request).
+"""Hourly forecasts from Open-Meteo (HRRR + GFS over the US; many locations per request).
 
-Points are snapped to a grid before fetching. Nearby checkpoints share one
-forecast (weather models are 3-13 km resolution anyway), routes that overlap
-reuse each other's data, and each cell is cached, so changing the checkpoint
-interval or re-planning the same trip doesn't hit the API again.
+Checkpoints are fetched at their own location (rounded to ~100 m, so overlapping
+routes share a lookup); the heatmap uses a grid along the routes. Every location is
+cached, so re-planning the same trip or switching back to an earlier spacing
+doesn't hit the API again. Works on the free tier; a paid key lifts its limits.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from django.core.cache import cache
 
 from ..domain.geo import LatLon
 from ..domain.risk import Conditions
+from . import quota
 from .http import RateLimited, UpstreamError, get_json, session
 
 HOURLY_VARS = ("wind_speed_10m", "wind_gusts_10m", "rain", "showers", "snowfall")
@@ -29,6 +30,11 @@ BATCH_BASE_S = 1.0
 BATCH_PER_HOUR_S = 4 / 120
 
 Cell = tuple[float, float]
+
+
+def exact(point: LatLon) -> Cell:
+    """A point rounded to ~100 m: its own forecast, shared only by points that close."""
+    return round(point[0], 3), round(point[1], 3)
 
 
 def snap(point: LatLon, cell_deg: float) -> Cell:
@@ -101,6 +107,11 @@ def _fetch_batch(cells: list[Cell], start: datetime, hours: int) -> list[Forecas
         try:
             data = get_json(session(), "weather", settings.OPEN_METEO_URL, params=params, timeout=45)
             break
+        except RateLimited as exc:
+            limit_hit = quota.from_provider_error(exc.message)
+            if isinstance(limit_hit, quota.QuotaExhausted) or wait is None:
+                raise limit_hit from exc  # retrying can't fix a daily or hourly limit
+            time.sleep(wait)
         except UpstreamError:
             if wait is None:
                 raise
@@ -116,6 +127,9 @@ class WeatherResult:
     forecasts: dict[Cell, Forecast]
     missing: frozenset[Cell]  # cells whose download failed
     rate_limited: bool  # at least one failure was the API's rate limit
+    quota_exhausted: bool = False  # a daily/hourly limit: retrying soon won't help
+    deferred: frozenset[Cell] = frozenset()  # not fetched yet: this minute's budget ran out
+    retry_after_s: int | None = None  # when the deferred cells can be fetched
 
 
 def _uncached(cells: set[Cell], start: datetime, hours: int) -> list[Cell]:
@@ -129,17 +143,31 @@ def estimate_seconds(cells: set[Cell], start: datetime, hours: int) -> int:
     return math.ceil(rounds * (BATCH_BASE_S + BATCH_PER_HOUR_S * hours))
 
 
-def forecasts(cells: set[Cell], start: datetime, hours: int) -> WeatherResult:
+def forecasts(
+    cells: set[Cell], start: datetime, hours: int, priority: list[Cell] | None = None
+) -> WeatherResult:
     """Hourly forecasts for every cell, `hours` long from `start` (UTC hour).
 
-    A failed batch doesn't fail the trip: its cells are reported as missing and
-    shown as "no forecast". Only when nothing at all could be fetched do we raise.
+    Cells are fetched in `priority` order (then the rest), and only as many as the
+    free tier's per-minute budget allows right now; the others come back as
+    `deferred` with the seconds until they can be fetched. The caller shows what it
+    has and asks again; cached cells are never fetched twice. A failed batch doesn't
+    fail the trip either: its cells are reported as missing. Only when nothing at
+    all is available do we raise.
     """
     out: dict[Cell, Forecast] = {}
     for cell in cells:
         if (hit := cache.get(_cache_key(cell, start, hours))) is not None:
             out[cell] = hit
-    todo = [c for c in sorted(cells) if c not in out]
+    first = [c for c in (priority or []) if c in cells and c not in out]
+    todo = list(dict.fromkeys(first + [c for c in sorted(cells) if c not in out]))
+    if todo and not out:
+        quota.check_daily(len(todo))  # nothing to show anyway: say so before trying
+    budget = quota.minute_budget()
+    todo, deferred = todo[:budget], todo[budget:]
+    if deferred and not todo and not out:
+        wait = quota.seconds_until_free()
+        raise RateLimited("weather", f"the free tier allows 600 lookups a minute; retrying in {wait} s", wait)
     batches = [todo[i : i + BATCH_SIZE] for i in range(0, len(todo), BATCH_SIZE)]
 
     missing: set[Cell] = set()
@@ -158,7 +186,16 @@ def forecasts(cells: set[Cell], start: datetime, hours: int) -> WeatherResult:
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         list(pool.map(fetch, batches))
+    # Counted once here, not in the worker threads: the cache's incr isn't atomic.
+    quota.record(len(todo) - len(missing))
 
     if cells and not out:
         raise errors[0]
-    return WeatherResult(out, frozenset(missing), any(isinstance(e, RateLimited) for e in errors))
+    return WeatherResult(
+        out,
+        frozenset(missing),
+        rate_limited=any(isinstance(e, RateLimited) for e in errors),
+        quota_exhausted=any(isinstance(e, quota.QuotaExhausted) for e in errors),
+        deferred=frozenset(deferred),
+        retry_after_s=quota.seconds_until_free() if deferred else None,
+    )

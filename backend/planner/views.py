@@ -5,8 +5,9 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from .serializers import PlanRequestSerializer
-from .services import geocoding, planner, routing
+from .services import geocoding, planner, quota, routing
 from .services.http import RateLimited, UpstreamError
+from .services.quota import QuotaExhausted
 
 log = logging.getLogger(__name__)
 
@@ -16,9 +17,15 @@ RETRY_AFTER_S = 60
 def _upstream_failed(exc: UpstreamError) -> Response:
     log.warning("upstream failure: %s", exc)
     body = {"detail": f"The {exc.service} service failed: {exc.message}"}
+    if isinstance(exc, QuotaExhausted):
+        # No retry_after: the browser shouldn't keep trying until the quota resets.
+        body["detail"] = exc.message[0].upper() + exc.message[1:]
+        body["quota_exhausted"] = True
+        return Response(body, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     if isinstance(exc, RateLimited):
-        body["retry_after_s"] = RETRY_AFTER_S
-        return Response(body, status=status.HTTP_503_SERVICE_UNAVAILABLE, headers={"Retry-After": str(RETRY_AFTER_S)})
+        wait = exc.retry_after_s or RETRY_AFTER_S
+        body["retry_after_s"] = wait
+        return Response(body, status=status.HTTP_503_SERVICE_UNAVAILABLE, headers={"Retry-After": str(wait)})
     return Response(body, status=status.HTTP_502_BAD_GATEWAY)
 
 
@@ -55,6 +62,12 @@ def geocode(request):
     except UpstreamError as exc:
         return _upstream_failed(exc)
     return Response([p.as_dict() for p in places])
+
+
+@api_view(["GET"])
+def usage(request):
+    """How much of Open-Meteo's free tier this server has used (per minute, hour, day)."""
+    return Response(quota.status())
 
 
 @api_view(["GET"])

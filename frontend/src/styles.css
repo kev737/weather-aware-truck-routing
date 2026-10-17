@@ -496,3 +496,32 @@ button.link {
   font-size: 0.8rem;
   color: var(--muted);
 }
+
+.warning {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  background: #f1f3f5;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.banner.provisional {
+  background: #fff9db;
+  border: 1px solid #ffec99;
+}
+
+.banner .tag {
+  margin-right: 6px;
+  padding: 1px 6px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  background: #ffe066;
+  border-radius: 4px;
+}
+
+.banner .hint {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
