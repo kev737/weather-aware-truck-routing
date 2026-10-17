@@ -23,21 +23,25 @@ when to go. If every route crosses No Travel weather, nothing is recommended.
 
 ## How the recommendation works
 
-Routes are compared on these criteria, in this order. A later criterion only matters when the
-earlier ones tie:
+The brief asks to recommend the best route **balancing weather risk and travel time**, preferring
+fewer Severe miles, then fewer High miles, then lower average risk, then shorter travel time. The
+app turns that into one score, in hours, and recommends the lowest:
 
-| # | Criterion | Note |
-|---|---|---|
-| 1 | Fewest **No Travel** miles | Added: a route you're told not to drive never beats one that's only Severe |
-| 2 | Fewest miles **without a forecast** | Added: missing data never makes a route look safer |
-| 3 | Fewest **Severe** miles | Brief #1 (No Travel miles count here too) |
-| 4 | Fewest **High** miles | Brief #2 |
-| 5 | Lowest **average risk** | Brief #3: levels 0–4, weighted by miles |
-| 6 | Shortest **travel time** | Brief #4 |
+```
+score = travel hours + (10 min × Severe mi + 2 min × High mi + 0.5 min × Moderate mi) / 60
+```
 
-This is a strict priority order (lexicographic), the way the brief lists it: safety always
-comes before speed. Miles are compared to the nearest mile, average risk to two decimals and time
-to the minute, so rounding noise never decides between two routes.
+So a 30-minute detour is worth it to avoid 3 Severe miles, but a 3-hour detour isn't worth it to
+avoid 2. The weights keep the brief's order (a Severe mile costs 5× a High mile, which costs 4× a
+Moderate one); they're a business choice, set here as "balanced" and easy to tune
+(`backend/planner/domain/recommend.py`). Two rules sit above the score, both cautious:
+
+- **No Travel miles always lose**: a route you're told not to drive is never recommended while
+  another route avoids it; if none does, nothing is recommended.
+- **Miles without a forecast come next**: missing data never makes a route look safer.
+
+Each mile counts once, in its own level. The explanation states the trade-off, e.g. *"30 min slower
+than the next option, but avoids weather worth 60 min (no Severe or High miles vs 6 Severe mi)."*
 
 Each checkpoint stands for the road halfway to its neighbours on each side, so checkpoint miles
 add up exactly to the route length. That's what makes "Severe miles" a real distance.
@@ -103,28 +107,28 @@ straight line between the cities once sent a truck over a mountain pass full of 
 
 ### Weather
 
-- [Open-Meteo](https://open-meteo.com/) hourly forecast: in the US it serves NOAA's HRRR (3 km,
-  hourly) for about the first 43 hours, then GFS.
-- Each checkpoint's forecast is fetched **at that checkpoint** (rounded to ~100 m, so overlapping
-  routes share a lookup) and read at the truck's ETA: the brief's sampling, literally. The heatmap
-  uses its own grid along the routes (7 mi on most trips). One download serves every route, every
-  departure time and the heatmap.
-- On the free tier (600 lookups a minute) the server paces itself: it fetches checkpoints first, in
-  route order, then the heatmap, only as many as this minute allows, and says when the rest can be
-  fetched. The browser asks again at that moment; until every checkpoint has its forecast the
-  recommendation is marked provisional. A cross-country trip at 10 mi (~1,250 lookups) completes in
-  about two to three minutes; regional trips in seconds. A paid Open-Meteo key (read from AWS
-  Parameter Store at deploy time) would remove the pacing.
-- Each forecast cell is cached for 30 minutes. If the free tier's rate limit cuts a download
-  short, the plan comes back with what arrived, missing stretches shown in grey. The browser then
-  retries with exponential backoff (5, 10, 20, 40, 60 s), and each retry only fetches what's still
-  missing.
-- Each (cell, hour) risk is computed once and reused for every route and departure time that
-  needs it.
-- The server counts what it downloads against Open-Meteo's free tier (600 a minute, 5,000 an hour,
-  under 10,000 a day per IP; see `/api/usage/`). Past 80% of the day the app says so; a download
-  that would cross the daily limit isn't attempted, and the app asks to try again tomorrow instead
-  of retrying.
+The app reads NOAA's forecast models from its own copy of their grids, so a checkpoint lookup is an
+array index, not an API call, and 10, 25 or 50 mi spacing costs the same on any trip length:
+
+- **HRRR (3 km, hourly, 0–48 h)** wherever it reaches. It's the only free model that simulates
+  thunderstorms directly: on a Florida evening it showed 0.5–1.1 in/hr bursts at West Palm Beach
+  where GFS showed a steady 0.05 in/hr (4.2 vs 0.5 inches over 24 h), the difference between
+  Severe / No Travel and Low.
+- **GFS (13 km, hourly to 120 h, 3-hourly to 240 h)** after that. When the departure is more than
+  48 hours away the app says so and suggests rechecking within 48 hours of leaving.
+- A job (`manage.py refresh_grids`, hourly via a systemd timer) downloads each new run, our five
+  fields only: 10 m wind, gusts, precipitation rate and frozen share, as byte ranges from NOAA's
+  AWS mirror (HRRR) or the continental-US box from NOAA's GRIB filter (GFS). It converts them to the
+  brief's units, turns GFS's 6-hour running averages into hourly rates, and keeps the two newest
+  runs as memory-mapped arrays. Rain is the liquid share of the precipitation rate; snow is the
+  frozen share at the standard 10:1 snow-to-water ratio.
+- HRRR is on a Lambert conformal grid; checkpoints find their cell with the projection formulas
+  (verified against the GRIB file's own coordinates: 2,000 of 2,000 random points).
+- Each checkpoint's forecast is read **at that checkpoint** and at the truck's ETA; the popup names
+  the model it came from. Points outside the grids (outside the US) fall back to Open-Meteo, paced
+  to its free tier (600 lookups a minute), checkpoints first.
+- Only the 00/06/12/18z HRRR runs reach 48 hours, so the newest forecast hour can be up to ~6 hours
+  older than HRRR's hourly runs. Using the hourly runs for the first 18 hours is a next step.
 
 ### Heatmap performance
 
@@ -157,18 +161,27 @@ cd frontend && npm ci && npm run dev
 ```
 
 No API keys are needed. All services are free: Valhalla and OSRM (OpenStreetMap routing), Photon
-(geocoding), Open-Meteo (weather) and OpenFreeMap (map tiles).
+(geocoding), NOAA HRRR and GFS (weather; Open-Meteo outside the US) and OpenFreeMap (map tiles).
+Locally, fill the grids once with `python manage.py refresh_grids` (about 1 GB; without them the app
+uses Open-Meteo).
 
 ## Tests
 
 ```bash
-cd backend && DJANGO_DEBUG=1 pytest -q      # 82 tests
-cd frontend && npm run lint && npm run build # type check + lint
+cd backend && DJANGO_DEBUG=1 pytest -q          # 113 tests
+cd frontend && npm test && npm run lint && npm run build  # 38 tests, lint, type check
 ```
 
-The tests cover every boundary in the risk table, each load rule, each step of the ranking, the
-checkpoint maths, the two-step API (with fake routes and weather), partial weather and the
-rate-limit retry, and the leave-later search. CI runs them on every push.
+Backend tests cover every boundary in the risk table, each load rule, the balanced score, the
+checkpoint maths, the two-step API (with fake routes and weather), the NOAA grids (projection,
+units, HRRR-before-GFS), partial weather, pacing and quotas, and the leave-later search.
+
+Frontend tests cover what the brief asks the map to show, with MapLibre replaced by a recorder
+(jsdom has no WebGL): all routes, every route's checkpoints with their risk, popups with mile,
+risk, ETA, weather and reason, route summaries, the heatmap carrying all 49 hours, and the slider
+repainting without re-sending data. Plus place suggestions (keyboard, Escape, never covering the
+Plan button), loading and retry states, the comparison table, and API errors. CI runs both suites
+on every push.
 
 ## Deployment
 
@@ -190,8 +203,6 @@ over the limit. CI runs the tests, lint and build on every push.
   8 hours of driving and 10 hours off duty after 11. On longer trips that shifts every later ETA,
   and with it the weather each checkpoint meets. Planning where the driver stops would also let
   the app place the rest where it sits out the worst weather.
-- **A weighted cost** with tunable weights, so a dispatcher can trade a few High miles for hours
-  saved. The brief's "balancing" wording allows it; this version follows its numbered order.
-- **15-minute forecasts** (Open-Meteo has them for the US) and **NWS warning polygons**
-  (api.weather.gov) as an official overlay.
-- **A paid Open-Meteo key** (`OPEN_METEO_API_KEY`) to remove the free tier's rate limit.
+- **Dispatcher-tunable weights**: let a fleet set how many minutes a Severe or High mile is worth.
+- **HRRR's hourly runs** for the first 18 hours (fresher than the 6-hourly 48-hour runs), and
+  **NWS warning polygons** (api.weather.gov) as an official overlay.

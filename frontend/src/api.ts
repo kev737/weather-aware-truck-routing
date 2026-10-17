@@ -18,7 +18,13 @@ export interface Checkpoint {
   risk: RiskKey | null; // null = beyond the forecast horizon
   risk_label: string;
   reasons: string[];
-  weather?: { wind_mph: number; gust_mph: number | null; rain_in_hr: number; snow_in_hr: number };
+  weather?: {
+    source: "hrrr" | "gfs" | "open-meteo" | null; // which forecast model this checkpoint's weather came from
+    wind_mph: number;
+    gust_mph: number | null;
+    rain_in_hr: number;
+    snow_in_hr: number;
+  };
 }
 
 /** A route as step 1 returns it: geometry and timing, no weather yet. */
@@ -42,6 +48,8 @@ export interface RouteOption extends RouteBasics {
     severe_mi: number;
     high_mi: number;
     avg_risk: number;
+    risk_min: number; // weather risk as minutes of driving it's worth avoiding
+    score_h: number; // travel hours + risk: what the recommendation minimises
     max_risk: RiskKey | null;
   };
   segments: { risk: RiskKey | null; from_mi: number; to_mi: number; coordinates: [number, number][] }[];
@@ -88,7 +96,8 @@ export type Warning =
       retry_after_s?: number; // when the rest can be fetched (the free tier's per-minute pacing)
       message: string;
     }
-  | { kind: "quota_low"; message: string };
+  | { kind: "quota_low"; message: string }
+  | { kind: "far_forecast"; message: string };
 
 export interface Plan extends Omit<Trip, "routes"> {
   routes: RouteOption[];
@@ -152,9 +161,11 @@ export function createTrip(req: PlanRequest, signal?: AbortSignal): Promise<Trip
   });
 }
 
+export const planTripUrl = (tripId: string) => `/api/trips/${tripId}/plan/`;
+
 /** Step 2: weather, risk and the recommendation. Safe to call again: it only downloads what's missing. */
 export function getPlan(tripId: string, signal?: AbortSignal): Promise<Plan> {
-  return call<Plan>(`/api/trips/${tripId}/plan/`, { signal });
+  return call<Plan>(planTripUrl(tripId), { signal });
 }
 
 export function searchPlaces(q: string, signal?: AbortSignal): Promise<Place[]> {

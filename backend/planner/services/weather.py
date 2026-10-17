@@ -57,6 +57,10 @@ class Forecast:
     gust: tuple[float | None, ...]
     rain: tuple[float | None, ...]  # rain + showers, in/hr
     snow: tuple[float | None, ...]  # in/hr
+    source: tuple[str | None, ...] = ()  # model per hour ("hrrr", "gfs", "open-meteo")
+
+    def source_at(self, i: int) -> str | None:
+        return self.source[i] if 0 <= i < len(self.source) else "open-meteo"
 
     def at_index(self, i: int) -> Conditions | None:
         if not 0 <= i < len(self.wind):
@@ -143,7 +147,42 @@ def estimate_seconds(cells: set[Cell], start: datetime, hours: int) -> int:
     return math.ceil(rounds * (BATCH_BASE_S + BATCH_PER_HOUR_S * hours))
 
 
+def _from_grids(grids, cell: Cell, start: datetime, hours: int) -> Forecast | None:
+    """A cell's forecast read from the local NOAA grids, or None outside them."""
+    series = grids.hourly(cell[0], cell[1], start, hours)
+    if series is None:
+        return None
+    pick = lambda k: tuple(None if v is None else v[k] for v in series)  # noqa: E731
+    gust = tuple(None if v is None or math.isnan(v[1]) else v[1] for v in series)
+    return Forecast(start=start, wind=pick(0), gust=gust, rain=pick(2), snow=pick(3), source=pick(4))
+
+
 def forecasts(
+    cells: set[Cell], start: datetime, hours: int, priority: list[Cell] | None = None
+) -> WeatherResult:
+    """Hourly forecasts for every cell: from the local NOAA grids where they reach
+    (no limits), from Open-Meteo for the rest (paced to its free tier)."""
+    from .grids import Grids
+
+    grids = Grids.current() if settings.USE_NOAA_GRIDS else None
+    if grids is None or not grids.available():
+        return _open_meteo_forecasts(cells, start, hours, priority)
+    local = {c: fc for c in cells if (fc := _from_grids(grids, c, start, hours)) is not None}
+    rest = set(cells) - set(local)
+    if not rest:
+        return WeatherResult(local, frozenset(), rate_limited=False)
+    remote = _open_meteo_forecasts(rest, start, hours, [c for c in (priority or []) if c in rest])
+    return WeatherResult(
+        {**local, **remote.forecasts},
+        remote.missing,
+        rate_limited=remote.rate_limited,
+        quota_exhausted=remote.quota_exhausted,
+        deferred=remote.deferred,
+        retry_after_s=remote.retry_after_s,
+    )
+
+
+def _open_meteo_forecasts(
     cells: set[Cell], start: datetime, hours: int, priority: list[Cell] | None = None
 ) -> WeatherResult:
     """Hourly forecasts for every cell, `hours` long from `start` (UTC hour).

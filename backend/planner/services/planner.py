@@ -14,9 +14,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from django.core.cache import cache
+from django.utils import timezone
 
 from ..domain.geo import haversine_mi, point_at, simplify
-from ..domain.recommend import RouteScore, explain, rank, score_route, sort_key
+from ..domain.recommend import RouteScore, explain, rank, risk_key, score_route, sort_key
 from ..domain.risk import Assessment, assess, risk_index
 from ..domain.route import Route, Sample, distinguishing_names, sample_checkpoints
 from . import geocoding, quota, routing, weather
@@ -27,6 +28,7 @@ HEATMAP_HOURS = 48
 WINDOW_HOURS = 48  # also try leaving up to this many hours later
 ROUTE_LETTERS = "ABC"
 TRIP_CACHE_S = 3600
+FAR_FORECAST_H = 48  # past this, HRRR doesn't reach: suggest checking again closer to departure
 
 
 class TripNotFound(LookupError):
@@ -228,6 +230,7 @@ def _checkpoint_dicts(
                 risk_label=a.level.label,
                 reasons=list(a.reasons),
                 weather={
+                    "source": table.fcs[t.cell].source_at(table.hour_index(eta)),
                     "wind_mph": round(cond.wind_mph, 1),
                     "gust_mph": None if cond.gust_mph is None else round(cond.gust_mph, 1),
                     "rain_in_hr": round(cond.rain_in_hr, 3),
@@ -264,6 +267,8 @@ def _score_summary(score: RouteScore, assessed: list[Assessment | None]) -> dict
         "severe_mi": round(score.severe_mi, 1),
         "high_mi": round(score.high_mi, 1),
         "avg_risk": round(score.avg_risk, 2),
+        "risk_min": round(score.risk_min),  # weather risk as minutes of driving it's worth avoiding
+        "score_h": round(score.score_h, 2),  # travel hours + risk: what the recommendation minimises
         "max_risk": max(levels).key if levels else None,
     }
 
@@ -285,7 +290,7 @@ def _departure_window(trip: Trip, table: RiskTable) -> dict | None:
 
     best_now = min((sc for d, sc in candidates if d == 0), key=sort_key)
     delay_h, best = min(candidates, key=lambda c: sort_key(c[1]))
-    if delay_h == 0 or sort_key(best)[:-1] >= sort_key(best_now)[:-1]:  # safer, not just faster
+    if delay_h == 0 or risk_key(best) >= risk_key(best_now):  # safer, not just faster
         return None
     return {
         "route_id": best.route_id,
@@ -362,6 +367,17 @@ def _warnings(trip: Trip, result: weather.WeatherResult) -> list[dict]:
                 "message": (
                     f"Weather is missing for {len(result.missing)} of {len(trip.locations)} points because of {why}. "
                     f"Those stretches are grey and count against a route. {then}"
+                ),
+            }
+        )
+    if trip.req.departure > timezone.now() + timedelta(hours=FAR_FORECAST_H):
+        warnings.append(
+            {
+                "kind": "far_forecast",
+                "message": (
+                    "This departure is more than 48 hours away, beyond the storm-resolving HRRR forecast: "
+                    "the weather comes from GFS and is less certain. Recheck within 48 hours of departure "
+                    "to confirm the weather holds."
                 ),
             }
         )

@@ -15,14 +15,20 @@ interface Row {
   show: (v: number) => string;
 }
 
-// In the same order as the ranking, so the table reads top-down like the decision.
+// The ranking: No Travel and missing data first, then the score (time + weather).
 const RISK_ROWS: Row[] = [
   { label: "No Travel", hint: "Never recommended while any route avoids it", value: (r) => r.summary.miles_by_risk.no_travel, show: miles },
   { label: "No forecast", hint: "Missing data never makes a route look safer", value: (r) => r.summary.no_forecast_mi, show: miles },
-  { label: "Severe", hint: "Includes No Travel miles", value: (r) => r.summary.severe_mi, show: miles },
+  { label: "Severe", value: (r) => r.summary.severe_mi, show: miles },
   { label: "High", value: (r) => r.summary.high_mi, show: miles },
   { label: "Average risk", hint: "0 = Low … 4 = No Travel, weighted by miles", value: (r) => r.summary.avg_risk, show: (v) => v.toFixed(2) },
   { label: "Travel time", value: (r) => r.hours, show: hours },
+  {
+    label: "Score",
+    hint: "What the recommendation minimises: travel time plus weather, where 1 Severe mile = 10 min, 1 High mile = 2 min, 1 Moderate mile = 0.5 min",
+    value: (r) => r.summary.score_h,
+    show: hours,
+  },
 ];
 
 function RiskBar({ route }: { route: RouteOption }) {
@@ -158,7 +164,7 @@ export function RouteComparison({ routes, plan, selectedId, onSelect }: Props) {
                   const cls = basic.id === selectedId ? "selected" : "";
                   if (!r) {
                     // Weather not loaded yet: time is known from step 1, risk isn't.
-                    const text = row.label === "Travel time" ? hours(basic.hours) : "…";
+                    const text = row.label === "Travel time" ? hours(basic.hours) : "…"; // the rest needs weather
                     return <td key={basic.id} className={cls}>{text}</td>;
                   }
                   const v = row.value(r);

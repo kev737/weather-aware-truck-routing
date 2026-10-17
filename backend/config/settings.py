@@ -51,11 +51,13 @@ WSGI_APPLICATION = "config.wsgi.application"
 # No models: the app is stateless apart from the API cache below.
 DATABASES = {}
 
-# Shared by all gunicorn workers, survives restarts within a deploy.
+# Shared by all gunicorn workers; on the server it's a Docker volume, so it survives deploys.
+# The NOAA forecast grids live under it too (CACHE_DIR/grids).
+CACHE_DIR = os.environ.get("CACHE_DIR", os.path.join(tempfile.gettempdir(), "truck-routing-cache"))
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
-        "LOCATION": os.environ.get("CACHE_DIR", os.path.join(tempfile.gettempdir(), "truck-routing-cache")),
+        "LOCATION": CACHE_DIR,
         "OPTIONS": {"MAX_ENTRIES": 20_000},
     }
 }
@@ -121,5 +123,8 @@ OPEN_METEO_LIMITS = {
     "day": int(os.environ.get("OPEN_METEO_LIMIT_DAY", 33_000 if PAID_WEATHER else 9_500)),
 }
 HEATMAP_MAX_CELLS = int(os.environ.get("HEATMAP_MAX_CELLS", 1_500 if PAID_WEATHER else 500))
+# Local NOAA grids (HRRR 0-48 h, GFS after), refreshed hourly by `manage.py refresh_grids`;
+# Open-Meteo covers anything outside them.
+USE_NOAA_GRIDS = env_bool("USE_NOAA_GRIDS", default=True)
 WEATHER_CACHE_S = 30 * 60  # forecasts update hourly
 GEOCODE_CACHE_S = 7 * 24 * 3600

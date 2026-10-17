@@ -38,6 +38,9 @@ class FakeForecast:
     def __init__(self, cell):
         self.windy = cell[1] > -100.2
 
+    def source_at(self, i):
+        return "hrrr"
+
     def at_index(self, i):
         if not 0 <= i <= 60:
             return None
@@ -79,7 +82,7 @@ def test_plan_recommends_the_route_away_from_the_storm(fakes):
     a = data["routes"][0]
     assert a["summary"]["severe_mi"] > 0  # the fast route drives through 50 mph wind
     assert data["recommendation"]["route_id"] == "C"  # leaves the storm soonest
-    assert "Severe miles" in data["recommendation"]["reason"]
+    assert "avoids weather worth" in data["recommendation"]["reason"]
 
 
 def test_heavy_load_turns_severe_wind_into_no_travel(fakes):
@@ -139,6 +142,9 @@ class PassingStorm:
 
     def __init__(self, start, ends):
         self.start, self.ends = start, ends
+
+    def source_at(self, i):
+        return "hrrr"
 
     def at_index(self, i):
         windy = self.start + timedelta(hours=i) < self.ends

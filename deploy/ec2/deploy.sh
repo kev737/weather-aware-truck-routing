@@ -25,4 +25,25 @@ if ! docker ps --format '{{.Names}}' | grep -q '^caddy$'; then
   docker run -d --name caddy --network web --restart unless-stopped -p 80:80 -p 443:443 \
     -v /opt/caddy/Caddyfile:/etc/caddy/Caddyfile:ro -v caddy_data:/data -v caddy_config:/config caddy:2.10-alpine
 fi
+# Forecast grids (HRRR + GFS): refreshed hourly inside the app container, and right after a deploy.
+cat > /etc/systemd/system/truck-grids.service <<'UNIT'
+[Unit]
+Description=Refresh NOAA forecast grids for the truck-routing app
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker exec app python manage.py refresh_grids
+UNIT
+cat > /etc/systemd/system/truck-grids.timer <<'UNIT'
+[Unit]
+Description=Hourly NOAA grid refresh
+[Timer]
+OnCalendar=*-*-* *:15:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now truck-grids.timer
+systemctl start --no-block truck-grids.service
+
 docker image prune -f
