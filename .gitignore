@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+backend/staticfiles/
+node_modules/
+frontend/dist/
+.DS_Store
+.pytest_cache/
