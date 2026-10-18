@@ -25,7 +25,7 @@ const USA: [number, number, number, number] = [-125, 24, -66, 50];
 const FONT = ["Noto Sans Bold"];
 
 interface Props {
-  tripId: string | null; // the map re-zooms only when this changes
+  tripId: string | null; // the map re-zooms when this changes or the trip gains a route
   routes: MapRoute[];
   selectedId: string | null;
   onSelect: (routeId: string) => void;
@@ -189,9 +189,9 @@ export function MapView({ tripId, routes, selectedId, onSelect, heatmap, hour, s
       (m.getSource("checkpoints") as GeoJSONSource).setData(checkpointPoints(routes, selectedId));
       // Before the weather arrives, show the selected route in blue so it still stands out.
       const isSelected = ["==", ["get", "id"], selectedId ?? ""] as ExpressionSpecification;
-      m.setPaintProperty("routes", "line-color", risky ? "#868e96" : ["case", isSelected, "#1c7ed6", "#868e96"]);
+      m.setPaintProperty("routes", "line-color", risky ? "#868e96" : ["case", isSelected, "#008080", "#868e96"]);
       m.setPaintProperty("routes", "line-width", ["case", isSelected, 6, 4]);
-      m.setPaintProperty("labels-bg", "circle-color", ["case", isSelected, "#1c7ed6", "#343a40"]);
+      m.setPaintProperty("labels-bg", "circle-color", ["case", isSelected, "#008080", "#343a40"]);
     });
   }, [routes, selectedId]);
 
@@ -213,7 +213,8 @@ export function MapView({ tripId, routes, selectedId, onSelect, heatmap, hour, s
     });
   }, [hour, showHeatmap]);
 
-  // New trip: zoom to it once. Weather retries for the same trip keep the user's view.
+  // New trip, or a route found after the first ones: zoom to fit. Weather retries for the
+  // same trip keep the user's view.
   useEffect(() => {
     if (!tripId) return;
     ready.current?.then(() => {
@@ -224,7 +225,7 @@ export function MapView({ tripId, routes, selectedId, onSelect, heatmap, hour, s
       // maxZoom: a very short trip still shows its streets, not an empty close-up.
       if (!bounds.isEmpty()) map.current!.fitBounds(bounds, { padding, duration: 800, maxZoom: 12 });
     });
-  }, [tripId]);
+  }, [tripId, routes.length]);
 
   return <div ref={container} className="map" />;
 }

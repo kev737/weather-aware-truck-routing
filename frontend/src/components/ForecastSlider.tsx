@@ -12,21 +12,21 @@ interface Props {
   onVisible: (v: boolean) => void;
 }
 
-const MAX_HOUR = 48;
 const STEP_MS = 400; // play speed: one forecast hour every 0.4 s
 
 /** The 0-48 h forecast slider over the map, with play/pause and a legend. */
 export function ForecastSlider({ heatmap, hour, onHour, playing, onPlaying, visible, onVisible }: Props) {
+  const maxHour = heatmap.hours.length - 1; // the server decides how far the heatmap reaches
   // Play: advance an hour at a time, stop at the end.
   useEffect(() => {
     if (!playing) return;
-    if (hour >= MAX_HOUR) {
+    if (hour >= maxHour) {
       onPlaying(false);
       return;
     }
     const id = setTimeout(() => onHour(hour + 1), STEP_MS);
     return () => clearTimeout(id);
-  }, [playing, hour, onHour, onPlaying]);
+  }, [playing, hour, maxHour, onHour, onPlaying]);
 
   return (
     <div className="forecast" role="group" aria-label="Weather heatmap forecast">
@@ -35,7 +35,7 @@ export function ForecastSlider({ heatmap, hour, onHour, playing, onPlaying, visi
           type="button"
           className="play"
           onClick={() => {
-            if (!playing && hour >= MAX_HOUR) onHour(0); // replay from the start
+            if (!playing && hour >= maxHour) onHour(0); // replay from the start
             onPlaying(!playing);
           }}
           aria-label={playing ? "Pause" : "Play"}
@@ -52,7 +52,7 @@ export function ForecastSlider({ heatmap, hour, onHour, playing, onPlaying, visi
       <input
         type="range"
         min={0}
-        max={MAX_HOUR}
+        max={maxHour}
         step={1}
         value={hour}
         onChange={(e) => {

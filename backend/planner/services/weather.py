@@ -206,7 +206,7 @@ def _open_meteo_forecasts(
     todo, deferred = todo[:budget], todo[budget:]
     if deferred and not todo and not out:
         wait = quota.seconds_until_free()
-        raise RateLimited("weather", f"the free tier allows 600 lookups a minute; retrying in {wait} s", wait)
+        raise RateLimited("weather", f"the weather service allows {quota.minute_limit_text()}; retrying in {wait} s", wait)
     batches = [todo[i : i + BATCH_SIZE] for i in range(0, len(todo), BATCH_SIZE)]
 
     missing: set[Cell] = set()

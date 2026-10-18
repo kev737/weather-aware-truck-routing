@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Walkthrough · Weather-Aware Truck Routing</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚚</text></svg>" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,700&display=swap" rel="stylesheet" />
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "DM Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        color: #e9f2f3;
+        background: #12212a;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: linear-gradient(180deg, #16303a 0%, #12212a 50%);
+      }
+      main {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 32px 16px;
+      }
+      h1 {
+        margin: 0 0 6px;
+        font-size: 1.6rem;
+        letter-spacing: -0.01em;
+      }
+      h1 span {
+        color: transparent;
+        background: linear-gradient(135deg, #40e0d0, #20b2aa);
+        -webkit-background-clip: text;
+        background-clip: text;
+      }
+      p {
+        margin: 0 0 20px;
+        color: rgb(233 242 243 / 0.7);
+      }
+      video {
+        display: block;
+        width: 100%;
+        background: #000;
+        border: 1px solid rgb(255 255 255 / 0.12);
+        border-radius: 10px;
+      }
+      nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 20px;
+      }
+      nav a {
+        padding: 10px 16px;
+        font-weight: 700;
+        color: #fff;
+        text-decoration: none;
+        background: #008080;
+        border-radius: 10px;
+      }
+      nav a:hover {
+        background: linear-gradient(135deg, #20b2aa, #008080);
+      }
+      nav a.secondary {
+        background: rgb(255 255 255 / 0.08);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Weather-Aware <span>Truck Routing</span></h1>
+      <p>Walkthrough of the Spotter AI take-home: the app, the routing and weather logic, and the code.</p>
+      <video controls preload="metadata" playsinline src="/walkthrough/walkthrough.mp4"></video>
+      <nav>
+        <a href="/">Open the app</a>
+        <a class="secondary" href="https://github.com/kev737/weather-aware-truck-routing">Code on GitHub</a>
+      </nav>
+    </main>
+  </body>
+</html>

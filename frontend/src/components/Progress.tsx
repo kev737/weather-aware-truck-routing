@@ -3,6 +3,7 @@ import type { Phase, Retry } from "../usePlanner";
 
 interface Props {
   phase: Phase;
+  routesFound?: number; // routes already on the map while the rest are found
   estimatedS: number | null; // weather download estimate from step 1
   startedAt: number | null;
   retry: Retry | null;
@@ -20,7 +21,7 @@ function useNow(active: boolean): number {
   return now;
 }
 
-export function Progress({ phase, estimatedS, startedAt, retry, onRetryNow }: Props) {
+export function Progress({ phase, routesFound = 0, estimatedS, startedAt, retry, onRetryNow }: Props) {
   const busy = phase === "routing" || phase === "weather" || retry !== null;
   const now = useNow(busy);
   if (!busy) return null;
@@ -43,6 +44,18 @@ export function Progress({ phase, estimatedS, startedAt, retry, onRetryNow }: Pr
             Retry now
           </button>
         )}
+      </div>
+    );
+  }
+
+  if (phase === "routing" && routesFound > 0) {
+    return (
+      <div className="progress" role="status">
+        <p>
+          {routesFound === 1 ? "1 route is" : `${routesFound} routes are`} on the map. Looking for a different
+          road for the rest…
+        </p>
+        <div className="bar indeterminate" />
       </div>
     );
   }

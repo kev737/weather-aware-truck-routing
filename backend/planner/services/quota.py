@@ -87,6 +87,11 @@ def minute_budget(now: datetime | None = None) -> int:
     return max(0, min(left))
 
 
+def minute_limit_text() -> str:
+    """The provider's per-minute limit, as the messages state it ("600 lookups a minute")."""
+    return f"{settings.OPEN_METEO_LIMITS['minute']:,} lookups a minute"
+
+
 def per_minute() -> int:
     """What we let ourselves fetch in any 60 seconds."""
     return int(settings.OPEN_METEO_LIMITS["minute"] * MINUTE_MARGIN)

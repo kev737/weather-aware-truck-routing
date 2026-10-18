@@ -82,6 +82,7 @@ export interface Trip {
   load_lb: number;
   interval_mi: number;
   routes: RouteBasics[];
+  routes_complete: boolean; // false while the server is still finding the last route(s)
   weather: { points: number; estimated_s: number };
 }
 
@@ -104,6 +105,7 @@ export interface Plan extends Omit<Trip, "routes"> {
   warnings: Warning[];
   recommendation: { route_id: string | null; reason: string; no_safe_route: boolean; provisional: boolean };
   best_window: BestWindow | null;
+  window_hours: number; // how far ahead leaving later was tried
   heatmap: Heatmap;
 }
 
@@ -159,6 +161,11 @@ export function createTrip(req: PlanRequest, signal?: AbortSignal): Promise<Trip
     body: JSON.stringify(req),
     signal,
   });
+}
+
+/** Step 1, polled: the routes found so far. */
+export function getTrip(tripId: string, signal?: AbortSignal): Promise<Trip> {
+  return call<Trip>(`/api/trips/${tripId}/`, { signal });
 }
 
 export const planTripUrl = (tripId: string) => `/api/trips/${tripId}/plan/`;

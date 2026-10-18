@@ -25,7 +25,7 @@ const RISK_ROWS: Row[] = [
   { label: "Travel time", value: (r) => r.hours, show: hours },
   {
     label: "Score",
-    hint: "What the recommendation minimises: travel time plus weather, where 1 Severe mile = 10 min, 1 High mile = 2 min, 1 Moderate mile = 0.5 min",
+    hint: "What the recommendation minimises: travel time plus weather, priced as crash risk: 1 Severe mile ≈ 10 min, High ≈ 2, Moderate ≈ 0.8; hazards on the same mile multiply",
     value: (r) => r.summary.score_h,
     show: hours,
   },
@@ -65,7 +65,7 @@ function Banner({ plan }: { plan: Plan }) {
     return (
       <div className="banner danger" role="alert">
         <strong>No safe route at your departure time.</strong> Every route crosses No Travel conditions.
-        {plan.best_window ? "" : " No safer departure in the next 48 hours either."}
+        {plan.best_window ? "" : ` No safer departure in the next ${plan.window_hours} hours either.`}
       </div>
     );
   }

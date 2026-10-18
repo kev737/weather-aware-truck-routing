@@ -18,12 +18,36 @@ docker build -t truck-routing /opt/app
 docker network inspect web >/dev/null 2>&1 || docker network create web
 docker rm -f app >/dev/null 2>&1 || true
 # The cache volume keeps forecasts, trips and the weather-quota count across deploys.
+CACHE_DIR=/tmp/truck-routing-cache
+# Logs are capped (3 x 10 MB) so the access log can't fill the disk.
 docker run -d --name app --network web --restart unless-stopped --env-file /opt/app.env \
-  -v truck_cache:/tmp/truck-routing-cache truck-routing
-if ! docker ps --format '{{.Names}}' | grep -q '^caddy$'; then
+  --log-opt max-size=10m --log-opt max-file=3 \
+  -e CACHE_DIR=$CACHE_DIR -v truck_cache:$CACHE_DIR truck-routing
+# Caddy: HTTPS for the app, plus /walkthrough (the video page; the video itself is copied to
+# /opt/walkthrough by hand and never lives in git).
+SITE=$(head -1 /opt/caddy/Caddyfile | cut -d' ' -f1)
+mkdir -p /opt/walkthrough
+cp /opt/app/deploy/ec2/walkthrough/index.html /opt/walkthrough/index.html
+cat > /opt/caddy/Caddyfile <<CADDY
+$SITE {
+	encode zstd gzip
+	handle_path /walkthrough* {
+		root * /srv/walkthrough
+		file_server
+	}
+	handle {
+		reverse_proxy app:8000
+	}
+}
+CADDY
+if ! docker inspect caddy --format '{{range .Mounts}}{{.Destination}} {{end}}' 2>/dev/null | grep -q /srv/walkthrough; then
   docker rm -f caddy >/dev/null 2>&1 || true
   docker run -d --name caddy --network web --restart unless-stopped -p 80:80 -p 443:443 \
-    -v /opt/caddy/Caddyfile:/etc/caddy/Caddyfile:ro -v caddy_data:/data -v caddy_config:/config caddy:2.10-alpine
+    --log-opt max-size=10m --log-opt max-file=3 \
+    -v /opt/caddy/Caddyfile:/etc/caddy/Caddyfile:ro -v /opt/walkthrough:/srv/walkthrough:ro \
+    -v caddy_data:/data -v caddy_config:/config caddy:2.10-alpine
+else
+  docker exec caddy caddy reload --config /etc/caddy/Caddyfile
 fi
 # Forecast grids (HRRR + GFS): refreshed hourly inside the app container, and right after a deploy.
 cat > /etc/systemd/system/truck-grids.service <<'UNIT'

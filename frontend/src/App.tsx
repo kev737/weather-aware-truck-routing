@@ -28,7 +28,9 @@ export default function App() {
   return (
     <div className="app">
       <aside className="sidebar">
-        <h1>Weather-Aware Truck Routing</h1>
+        <h1>
+          Weather-Aware <span className="accent">Truck Routing</span>
+        </h1>
         <TripForm
           loading={phase === "routing" || phase === "weather"}
           onSubmit={(req) => {
@@ -38,6 +40,7 @@ export default function App() {
         />
         <Progress
           phase={phase}
+          routesFound={trip?.routes.length ?? 0}
           estimatedS={trip?.weather.estimated_s ?? null}
           startedAt={planner.weatherStartedAt}
           retry={planner.retry}

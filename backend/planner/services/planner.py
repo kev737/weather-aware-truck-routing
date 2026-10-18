@@ -2,12 +2,16 @@
 
 1. `create_trip`: places -> three truck routes -> timed checkpoints. Fast (seconds).
    Saved in the cache under a trip id, with an estimate of the weather download.
+   If the first routes come back before all three are found, they're returned
+   right away and the rest are found in the background (`load_trip` polls).
 2. `plan_trip`: weather at every checkpoint's ETA -> risk -> recommendation, plus
    the 0-48 h departure window and the heatmap.
 """
 from __future__ import annotations
 
+import logging
 import math
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -20,15 +24,17 @@ from ..domain.geo import haversine_mi, point_at, thin_by_distance
 from ..domain.recommend import RouteScore, explain, rank, risk_key, score_route, sort_key
 from ..domain.risk import Assessment, assess, risk_index
 from ..domain.route import Route, Sample, distinguishing_names, sample_checkpoints
-from . import geocoding, quota, routing, weather
+from . import geocoding, grids, quota, routing, weather
 from .corridor import pick_grid
 from .geocoding import Place
+
+log = logging.getLogger(__name__)
 
 HEATMAP_HOURS = 48
 WINDOW_HOURS = 48  # also try leaving up to this many hours later
 ROUTE_LETTERS = "ABC"
 TRIP_CACHE_S = 3600
-FAR_FORECAST_H = 48  # past this, HRRR doesn't reach: suggest checking again closer to departure
+FAR_FORECAST_H = grids.HRRR_HOURS  # past this, HRRR doesn't reach: suggest checking again closer to departure
 
 
 class TripNotFound(LookupError):
@@ -75,6 +81,7 @@ class Trip:
     heat_deg: float  # heatmap grid size
     heat_cells: frozenset[weather.Cell]  # heatmap grid along the routes
     points: frozenset[weather.Cell]  # every checkpoint's exact location
+    routes_complete: bool = True  # False while the last routes are still being found
 
     @property
     def locations(self) -> frozenset[weather.Cell]:
@@ -88,7 +95,8 @@ class Trip:
     @property
     def weather_hours(self) -> int:
         """Enough forecast for the latest departure in the window plus the longest trip."""
-        last = self.req.departure + timedelta(hours=WINDOW_HOURS, seconds=max(self.trip_s.values()))
+        later = max(WINDOW_HOURS, HEATMAP_HOURS)  # the latest departure tried, or the heatmap's last hour
+        last = self.req.departure + timedelta(hours=later, seconds=max(self.trip_s.values()))
         return math.ceil((last - self.weather_start).total_seconds() / 3600) + 1
 
 
@@ -108,19 +116,37 @@ def create_trip(req: TripRequest) -> tuple[Trip, dict]:
     if haversine_mi((origin.lat, origin.lon), (dest.lat, dest.lon)) < SAME_PLACE_MI:
         raise SamePlace("Origin and destination are the same place. Pick two different places.")
 
-    found = routing.truck_routes((origin.lat, origin.lon), (dest.lat, dest.lon), req.load_lb, req.departure)
+    found, finish = routing.start_routes((origin.lat, origin.lon), (dest.lat, dest.lon), req.load_lb)
+    trip = _build_trip(uuid.uuid4().hex, req, origin, dest, found, complete=finish is None)
+    cache.set(f"trip:{trip.id}", trip, TRIP_CACHE_S)
+    if finish is not None:
+        in_background(lambda: _finish_routes(trip, finish))
+    return trip, trip_summary(trip)
+
+
+def _build_trip(trip_id: str, req: TripRequest, origin: Place, dest: Place, found: list[Route], complete: bool) -> Trip:
     routes = dict(zip(ROUTE_LETTERS, found))
     trip_s = {rid: r.duration_s for rid, r in routes.items()}
     timed = {rid: _timed(r, req.interval_mi) for rid, r in routes.items()}
     points = frozenset(t.cell for cps in timed.values() for t in cps)
     heat_deg, heat_cells = pick_grid(list(routes.values()))
-
     names = dict(zip(routes, distinguishing_names(list(routes.values()))))
-    trip = Trip(
-        uuid.uuid4().hex, req, origin, dest, routes, names, trip_s, timed, heat_deg, frozenset(heat_cells), points
-    )
-    cache.set(f"trip:{trip.id}", trip, TRIP_CACHE_S)
-    return trip, _trip_summary(trip)
+    return Trip(trip_id, req, origin, dest, routes, names, trip_s, timed, heat_deg, frozenset(heat_cells), points, complete)
+
+
+def in_background(fn) -> None:
+    threading.Thread(target=fn, daemon=True).start()
+
+
+def _finish_routes(trip: Trip, finish) -> None:
+    """Find the remaining routes and save the full trip under the same id."""
+    try:
+        found = finish()
+    except Exception:  # keep the routes we have rather than leave the browser waiting
+        log.exception("finding the remaining routes failed for trip %s", trip.id)
+        found = list(trip.routes.values())
+    full = _build_trip(trip.id, trip.req, trip.origin, trip.destination, found, complete=True)
+    cache.set(f"trip:{trip.id}", full, TRIP_CACHE_S)
 
 
 def load_trip(trip_id: str) -> Trip:
@@ -149,7 +175,7 @@ def _route_summary(trip: Trip, rid: str) -> dict:
     }
 
 
-def _trip_summary(trip: Trip) -> dict:
+def trip_summary(trip: Trip) -> dict:
     return {
         "id": trip.id,
         "origin": trip.origin.as_dict(),
@@ -158,6 +184,7 @@ def _trip_summary(trip: Trip) -> dict:
         "load_lb": trip.req.load_lb,
         "interval_mi": trip.req.interval_mi,
         "routes": [_route_summary(trip, rid) for rid in trip.routes],
+        "routes_complete": trip.routes_complete,
         "weather": {
             "points": len(trip.locations),
             "estimated_s": weather.estimate_seconds(set(trip.locations), trip.weather_start, trip.weather_hours),
@@ -202,7 +229,10 @@ def _assess_all(timed: list[TimedCheckpoint], table: RiskTable, depart_at: datet
 
 def _score(rid: str, timed: list[TimedCheckpoint], assessed: list[Assessment | None], total_s: float) -> RouteScore:
     """`total_s` is the time criterion: waiting (if any) plus the trip, i.e. time until arrival."""
-    legs = [(None if a is None else a.level, t.sample.covers_mi) for t, a in zip(timed, assessed)]
+    legs = [
+        (None, t.sample.covers_mi) if a is None else (a.level, t.sample.covers_mi, (a.wind, a.rain, a.snow))
+        for t, a in zip(timed, assessed)
+    ]
     return score_route(rid, legs, total_s)
 
 
@@ -330,13 +360,13 @@ def _warnings(trip: Trip, result: weather.WeatherResult) -> list[dict]:
         checkpoints_waiting = len(result.deferred & trip.points)
         if checkpoints_waiting:
             what = (
-                f"Weather for {n} more points arrives in about {wait} s: the free weather service allows "
-                "600 lookups a minute. Until then those stretches are grey and the recommendation is provisional."
+                f"Weather for {n} more points arrives in about {wait} s: the weather service allows "
+                f"{quota.minute_limit_text()}. Until then those stretches are grey and the recommendation is provisional."
             )
         else:  # every checkpoint is in: the recommendation is final, only the heatmap is filling in
             what = (
-                f"The heatmap's last {n} points arrive in about {wait} s (the free weather service allows "
-                "600 lookups a minute). The recommendation is final."
+                f"The heatmap's last {n} points arrive in about {wait} s (the weather service allows "
+                f"{quota.minute_limit_text()}). The recommendation is final."
             )
         warnings.append(
             {
@@ -375,9 +405,9 @@ def _warnings(trip: Trip, result: weather.WeatherResult) -> list[dict]:
             {
                 "kind": "far_forecast",
                 "message": (
-                    "This departure is more than 48 hours away, beyond the storm-resolving HRRR forecast: "
-                    "the weather comes from GFS and is less certain. Recheck within 48 hours of departure "
-                    "to confirm the weather holds."
+                    f"This departure is more than {FAR_FORECAST_H} hours away, beyond the storm-resolving HRRR "
+                    f"forecast: the weather comes from GFS and is less certain. Recheck within {FAR_FORECAST_H} "
+                    "hours of departure to confirm the weather holds."
                 ),
             }
         )
@@ -424,7 +454,7 @@ def plan_trip(trip: Trip) -> dict:
         r["recommended"] = r["id"] == best.route_id and not no_safe_route
 
     return {
-        **_trip_summary(trip),
+        **trip_summary(trip),
         "routes": routes,
         "recommendation": {
             "route_id": None if no_safe_route else best.route_id,
@@ -433,6 +463,7 @@ def plan_trip(trip: Trip) -> dict:
             "provisional": provisional,  # some checkpoints still have no forecast
         },
         "best_window": _departure_window(trip, table),
+        "window_hours": WINDOW_HOURS,  # how far ahead leaving later was tried
         "heatmap": _heatmap(trip, table),
         "warnings": _warnings(trip, result),
         "quota": quota.status(),

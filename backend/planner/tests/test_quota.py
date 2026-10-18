@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from django.core.cache import cache
@@ -76,7 +77,7 @@ def test_exhausted_quota_is_a_503_without_retry(monkeypatch):
     def exhausted(trip):
         raise quota.QuotaExhausted(quota.daily_message())
 
-    monkeypatch.setattr(planner, "load_trip", lambda trip_id: object())
+    monkeypatch.setattr(planner, "load_trip", lambda trip_id: SimpleNamespace(routes_complete=True))
     monkeypatch.setattr(planner, "plan_trip", exhausted)
     resp = APIClient().get("/api/trips/abc/plan/")
     assert resp.status_code == 503

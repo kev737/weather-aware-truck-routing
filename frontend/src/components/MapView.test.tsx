@@ -140,6 +140,14 @@ describe("MapView", () => {
     expect(of("fitBounds")).toHaveLength(2);
   });
 
+  it("zooms again when the last route arrives for the same trip, so it's in view", async () => {
+    const { view, props } = await mount({ routes: plan().routes.slice(0, 2) });
+    expect(of("fitBounds")).toHaveLength(1);
+    view.rerender(<MapView {...props} routes={plan().routes} />);
+    await act(async () => await Promise.resolve());
+    expect(of("fitBounds")).toHaveLength(2);
+  });
+
   it("selecting another route moves the risk colours to it", async () => {
     const { view, props } = await mount();
     view.rerender(<MapView {...props} selectedId="B" />);

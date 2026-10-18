@@ -7,7 +7,7 @@ from rest_framework.test import APIClient
 
 from planner.domain.geo import destination
 from planner.domain.route import Route
-from planner.services import routing, weather
+from planner.services import planner, routing, weather
 from planner.services.geocoding import Place
 
 HOUR = 3600
@@ -50,7 +50,7 @@ class FakeForecast:
 @pytest.fixture
 def fakes(monkeypatch):
     monkeypatch.setattr("planner.services.geocoding.resolve", fake_resolve)
-    monkeypatch.setattr(routing, "truck_routes", lambda o, d, load, dep: ROUTES)
+    monkeypatch.setattr(routing, "start_routes", lambda o, d, load: (ROUTES, None))
     monkeypatch.setattr(weather, "forecasts", lambda cells, start, hours, priority=None: result({c: FakeForecast(c) for c in cells}))
 
 
@@ -131,7 +131,7 @@ def test_upstream_failure_is_a_clear_502(monkeypatch, fakes):
     def boom(*args):
         raise routing.UpstreamError("routing", "no truck route found between these places")
 
-    monkeypatch.setattr(routing, "truck_routes", boom)
+    monkeypatch.setattr(routing, "start_routes", boom)
     resp = post(body())
     assert resp.status_code == 502
     assert "no truck route" in resp.json()["detail"]
@@ -189,7 +189,37 @@ def test_step_one_returns_routes_and_a_weather_estimate(fakes, monkeypatch):
     assert "summary" not in data["routes"][0]  # risk comes in step 2
 
 
+def test_first_routes_come_back_at_once_and_the_last_one_follows(fakes, monkeypatch):
+    later = []
+    monkeypatch.setattr(routing, "start_routes", lambda o, d, load: (ROUTES[:2], lambda: ROUTES))
+    monkeypatch.setattr(planner, "in_background", later.append)  # run it when the test says
+    client = APIClient()
+    first = client.post("/api/trips/", body(), format="json").json()
+    assert [r["id"] for r in first["routes"]] == ["A", "B"] and first["routes_complete"] is False
+    assert client.get(f"/api/trips/{first['id']}/plan/").status_code == 409  # no weather until all three
+
+    later.pop()()  # the background search finishes
+    polled = client.get(f"/api/trips/{first['id']}/").json()
+    assert [r["id"] for r in polled["routes"]] == ["A", "B", "C"] and polled["routes_complete"] is True
+    assert client.get(f"/api/trips/{first['id']}/plan/").status_code == 200
+
+
+def test_if_the_background_search_fails_the_first_routes_are_kept(fakes, monkeypatch):
+    def broken():
+        raise routing.UpstreamError("routing", "server went away")
+
+    later = []
+    monkeypatch.setattr(routing, "start_routes", lambda o, d, load: (ROUTES[:2], broken))
+    monkeypatch.setattr(planner, "in_background", later.append)
+    client = APIClient()
+    trip_id = client.post("/api/trips/", body(), format="json").json()["id"]
+    later.pop()()
+    polled = client.get(f"/api/trips/{trip_id}/").json()
+    assert len(polled["routes"]) == 2 and polled["routes_complete"] is True
+
+
 def test_unknown_trip_is_404(fakes):
+    assert APIClient().get("/api/trips/nope/").status_code == 404
     assert APIClient().get("/api/trips/nope/plan/").status_code == 404
 
 
@@ -233,7 +263,7 @@ def test_unroutable_places_are_a_clear_400(monkeypatch, fakes):
     def no_route(*args):
         raise routing.NoRoute("No truck route connects these places. Is one of them across water?")
 
-    monkeypatch.setattr(routing, "truck_routes", no_route)
+    monkeypatch.setattr(routing, "start_routes", no_route)
     resp = APIClient().post("/api/trips/", body(destination="Honolulu, HI"), format="json")
     assert resp.status_code == 400
     assert "across water" in resp.json()["detail"]

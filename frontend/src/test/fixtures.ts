@@ -57,10 +57,12 @@ export function plan(over: Partial<Plan> = {}): Plan {
     load_lb: 40000,
     interval_mi: 25,
     routes: [a, b, c],
+    routes_complete: true,
     weather: { points: 100, estimated_s: 3 },
     warnings: [],
     recommendation: { route_id: "A", reason: "Fastest and clear.", no_safe_route: false, provisional: false },
     best_window: null,
+    window_hours: 48,
     heatmap: {
       hours: Array.from({ length: 49 }, (_, h) => new Date(Date.UTC(2026, 9, 18, 14 + h)).toISOString()),
       cell_deg: 0.1,

@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import math
 from collections import Counter
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime
 
 from django.conf import settings
 from django.core.cache import cache
@@ -344,18 +344,27 @@ def overlap(route: Route, others: list[Route]) -> float:
     return _shared_fraction(route, [_Footprint(o) for o in others]) if others else 0.0
 
 
-def truck_routes(origin: LatLon, dest: LatLon, load_lb: float, departure: datetime) -> list[Route]:
-    """Three truck routes (fewer only if the engine has no other way at all), best first.
+def start_routes(origin: LatLon, dest: LatLon, load_lb: float) -> tuple[list[Route], Callable[[], list[Route]] | None]:
+    """The routes found so far, and a function that finds the rest (None if there's nothing left to find).
 
-    `departure` is unused: Valhalla's public server has no traffic data, so travel
-    time doesn't depend on when you leave.
+    The first routes come from one round of requests; when they aren't three different
+    ones, the penalty rounds take a few more seconds, so the caller can show the first
+    routes meanwhile. Three routes (fewer only if the engine has no other way at all), best first.
     """
     key = f"routes:{origin[0]:.4f},{origin[1]:.4f}:{dest[0]:.4f},{dest[1]:.4f}:{gross_weight_tonnes(load_lb)}"
     if (hit := cache.get(key)) is not None:
-        return hit
-    routes = _distinct_routes(origin, dest, load_lb)
-    cache.set(key, routes, ROUTE_CACHE_S)
-    return routes
+        return hit, None
+    search = RouteSearch(origin, dest, load_lb)
+    if search.done:
+        cache.set(key, search.chosen, ROUTE_CACHE_S)
+        return search.chosen, None
+
+    def finish() -> list[Route]:
+        routes = search.finish()
+        cache.set(key, routes, ROUTE_CACHE_S)
+        return routes
+
+    return list(search.chosen), finish
 
 
 def _first_routes(origin: LatLon, dest: LatLon, load_lb: float) -> tuple[list[Route], list[LatLon]]:
@@ -390,7 +399,7 @@ def _first_routes(origin: LatLon, dest: LatLon, load_lb: float) -> tuple[list[Ro
     return routes, main_waypoints
 
 
-def _distinct_routes(origin: LatLon, dest: LatLon, load_lb: float) -> list[Route]:
+class RouteSearch:
     """The main route plus the two most different reasonable alternatives.
 
     Candidates come from the engine's own alternates, then penalty rounds (each
@@ -398,36 +407,47 @@ def _distinct_routes(origin: LatLon, dest: LatLon, load_lb: float) -> list[Route
     on different roads and at most 1.5x slower. If the road network doesn't allow
     that (e.g. one interstate through the mountains), the third slot gets the
     least-overlapping candidate up to 2x slower, so there are always three.
+
+    Creating it runs the first round; `finish()` runs the penalty rounds.
     """
-    routes, waypoints = _first_routes(origin, dest, load_lb)
-    main = routes[0]
-    chosen = [main]
-    pool: list[Route] = []  # reasonable but not different enough, for the fill step
 
-    def consider(candidate: Route) -> None:
-        if len(chosen) >= ROUTE_COUNT or candidate.duration_s > main.duration_s * MAX_FILL_TIME_RATIO:
+    def __init__(self, origin: LatLon, dest: LatLon, load_lb: float):
+        self.load_lb = load_lb
+        self.routes, self.waypoints = _first_routes(origin, dest, load_lb)
+        self.main = self.routes[0]
+        self.chosen = [self.main]
+        self.pool: list[Route] = []  # reasonable but not different enough, for the fill step
+        for alt in self.routes[1:]:
+            self._consider(alt)
+
+    @property
+    def done(self) -> bool:
+        return len(self.chosen) >= ROUTE_COUNT
+
+    def _consider(self, candidate: Route) -> None:
+        if self.done or candidate.duration_s > self.main.duration_s * MAX_FILL_TIME_RATIO:
             return
-        if candidate.duration_s <= main.duration_s * MAX_ALTERNATIVE_TIME_RATIO and (
-            overlap(candidate, chosen) <= MAX_SHARED_FRACTION
+        if candidate.duration_s <= self.main.duration_s * MAX_ALTERNATIVE_TIME_RATIO and (
+            overlap(candidate, self.chosen) <= MAX_SHARED_FRACTION
         ):
-            chosen.append(candidate)
+            self.chosen.append(candidate)
         else:
-            pool.append(candidate)
+            self.pool.append(candidate)
 
-    for alt in routes[1:]:
-        consider(alt)
-    for span, per_route in AVOID_ROUNDS:
-        if len(chosen) >= ROUTE_COUNT:
-            break  # usually after the first round
-        try:
-            found = request_routes(waypoints, load_lb, 0, avoid=_avoid_points(routes, span, per_route))
-        except UpstreamError:
-            continue  # e.g. no truck-legal way around those points
-        consider(found[0])
+    def finish(self) -> list[Route]:
+        for span, per_route in AVOID_ROUNDS:
+            if self.done:
+                break  # usually after the first round
+            try:
+                avoid = _avoid_points(self.routes, span, per_route)
+                found = request_routes(self.waypoints, self.load_lb, 0, avoid=avoid)
+            except UpstreamError:
+                continue  # e.g. no truck-legal way around those points
+            self._consider(found[0])
 
-    while len(chosen) < ROUTE_COUNT and pool:
-        pool.sort(key=lambda r: overlap(r, chosen))
-        best = pool.pop(0)
-        if overlap(best, chosen) < 0.995:  # skip exact duplicates
-            chosen.append(best)
-    return chosen
+        while not self.done and self.pool:
+            self.pool.sort(key=lambda r: overlap(r, self.chosen))
+            best = self.pool.pop(0)
+            if overlap(best, self.chosen) < 0.995:  # skip exact duplicates
+                self.chosen.append(best)
+        return self.chosen

@@ -1,7 +1,7 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
-// In development the Django API runs on :18731; in production Netlify proxies /api.
+// In development the Django API runs on :18731; in production Django serves the app and /api.
 export default defineConfig({
   plugins: [react()],
   build: {

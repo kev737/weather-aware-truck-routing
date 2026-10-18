@@ -21,10 +21,6 @@ export const RISK_COLOR: Record<RiskKey, string> = {
 
 export const NO_FORECAST_COLOR = "#868e96";
 
-export function riskColor(risk: RiskKey | null): string {
-  return risk ? RISK_COLOR[risk] : NO_FORECAST_COLOR;
-}
-
 export function hours(h: number): string {
   const whole = Math.floor(h);
   const min = Math.round((h - whole) * 60);

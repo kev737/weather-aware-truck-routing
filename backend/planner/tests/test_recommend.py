@@ -1,4 +1,6 @@
-from planner.domain.recommend import explain, rank, risk_key, score_route
+import pytest
+
+from planner.domain.recommend import explain, rank, risk_key, score_route, weather_minutes
 from planner.domain.risk import Risk
 
 L, M, H, S, N = Risk.LOW, Risk.MODERATE, Risk.HIGH, Risk.SEVERE, Risk.NO_TRAVEL
@@ -9,10 +11,32 @@ def ids(scores):
     return [s.route_id for s in rank(scores)]
 
 
+def test_weights_come_from_crash_cost_against_truck_time():
+    """$0.24 crash cost per mile / $1.50 per minute x 7 risk aversion = 1.12 min per extra "normal mile"."""
+    assert weather_minutes([L]) == 0
+    assert weather_minutes([M]) == pytest.approx(0.78, abs=0.01)
+    assert weather_minutes([H]) == pytest.approx(2.24, abs=0.01)
+    assert weather_minutes([S]) == pytest.approx(10.08, abs=0.01)
+
+
+def test_hazards_on_the_same_mile_multiply():
+    severe_wind_in_high_rain = weather_minutes([S, H, L])  # 10x * 3x = 30x the crash rate
+    assert severe_wind_in_high_rain == pytest.approx(29 * 1.12, abs=0.1)
+    assert severe_wind_in_high_rain > weather_minutes([S]) + weather_minutes([H])  # more than adding
+
+
+def test_stacked_hazards_raise_the_score_but_not_the_level():
+    alone = score_route("A", [(S, 10, (S, L, L))], HOUR)
+    stacked = score_route("B", [(S, 10, (S, H, L))], HOUR)
+    assert alone.severe_mi == stacked.severe_mi == 10
+    assert stacked.risk_min == pytest.approx(alone.risk_min * 29 / 9)  # (30 - 1) / (10 - 1)
+    assert ids([stacked, alone]) == ["A", "B"]
+
+
 def test_score_is_travel_time_plus_weather_minutes():
     s = score_route("A", [(L, 100), (M, 20), (H, 10), (S, 3)], 5 * HOUR)
-    assert s.risk_min == 20 * 0.5 + 10 * 2 + 3 * 10  # 60 minutes of weather
-    assert s.score_h == 6.0
+    assert s.risk_min == pytest.approx(20 * 0.784 + 10 * 2.24 + 3 * 10.08)  # about 68 minutes of weather
+    assert s.score_h == pytest.approx(5 + s.risk_min / 60)
 
 
 def test_a_short_detour_beats_severe_weather():

@@ -3,7 +3,7 @@
 A React + Django app that helps a truck driver pick the safest of three routes, based on the
 weather the truck will meet at each point along the way, its load weight and travel time.
 
-**Live app:** https://52-24-82-112.sslip.io · **Walkthrough:** _Loom link_
+**Live app:** https://52-24-82-112.sslip.io · **Walkthrough video:** https://52-24-82-112.sslip.io/walkthrough
 
 ## What it does
 
@@ -28,13 +28,41 @@ fewer Severe miles, then fewer High miles, then lower average risk, then shorter
 app turns that into one score, in hours, and recommends the lowest:
 
 ```
-score = travel hours + (10 min × Severe mi + 2 min × High mi + 0.5 min × Moderate mi) / 60
+score = travel hours + weather minutes / 60
 ```
 
-So a 30-minute detour is worth it to avoid 3 Severe miles, but a 3-hour detour isn't worth it to
-avoid 2. The weights keep the brief's order (a Severe mile costs 5× a High mile, which costs 4× a
-Moderate one); they're a business choice, set here as "balanced" and easy to tune
-(`backend/planner/domain/recommend.py`). Two rules sit above the score, both cautious:
+A mile's weather minutes are what its extra crash risk is worth in driving time. The crash cost is
+the **full cost of a crash to society** (FMCSA's figure: injuries, lives and property, mostly in the
+other vehicles), not just the carrier's insurance bill: a route recommendation is a safety decision.
+
+| Input | Value | Basis |
+|---|---|---|
+| Truck time | $1.50 / min | ATRI operating cost, about $91 per hour |
+| Expected crash cost of an ordinary mile | $0.24 | ~$150k full cost of an average truck crash (FMCSA, $91k in 2005 dollars) × ~1.6 police-reported crashes per million truck miles |
+| Crash rate in Moderate / High / Severe weather | 1.7× / 3× / 10× | Rain and snow raise crash rates by about 70–85%; single-truck crashes in snow by about 9.7× |
+| Risk aversion | 7× | The average hides the rare crash that kills someone; the carrier's own worst case, an award above its policy limit, can end the company |
+
+```
+weather minutes per mile = $0.24 / $1.50 × 7 × (crash multiplier − 1)
+```
+
+Hazards on the same mile **multiply**: crash models treat weather factors as multipliers, and a wet
+road lowers the wind it takes to push a truck sideways. One hazard alone comes to about 0.8 min per
+Moderate mile, 2.2 per High mile and 10 per Severe mile; Severe wind in High rain is 30× the crash
+rate, about 32 min per mile. So a 30-minute detour is worth it to avoid 3 Severe miles, but a 3-hour
+detour isn't worth it to avoid 2. The displayed level stays the brief's table (the worst hazard);
+stacking only changes the score. The inputs are estimates and easy to tune
+(`backend/planner/domain/recommend.py`); on average crash cost alone (risk aversion 1) a Severe mile
+would be worth only about 1.4 minutes of detour.
+
+Sources: [ATRI operating costs (FleetOwner)](https://www.fleetowner.com/operations/article/55392569/atri-report-breaks-down-class-8-truck-operating-costs-by-region-and-expense-category),
+[FMCSA unit costs of truck crashes](https://www.fmcsa.dot.gov/sites/fmcsa.dot.gov/files/docs/UnitCostsTruck%20Crashes2007.pdf),
+[FMCSA Large Truck and Bus Crash Facts](https://www.fmcsa.dot.gov/safety/data-and-statistics/large-truck-and-bus-crash-facts-2022-1),
+[Qiu & Nixon 2008, weather and crashes meta-analysis](https://journals.sagepub.com/doi/10.3141/2055-16),
+[Becker et al. 2022, weather and crash types incl. trucks](https://link.springer.com/article/10.1186/s12544-022-00561-2),
+[FHWA truck braking on wet pavement](https://www.fhwa.dot.gov/reports/tswstudy/TSWwp5.pdf).
+
+Two rules sit above the score, both cautious:
 
 - **No Travel miles always lose**: a route you're told not to drive is never recommended while
   another route avoids it; if none does, nothing is recommended.
@@ -72,9 +100,10 @@ the worst of wind (after the load rules), rain and snow.
 ```
 React (Vite, TypeScript, MapLibre)             Django REST Framework
 ──────────────────────────────────             ─────────────────────────────────────────
-TripForm ── POST /api/trips/ ───────────────►  geocode (Photon) → 3 truck routes (Valhalla)
+TripForm ── POST /api/trips/ ───────────────►  geocode (Photon) → first truck routes (Valhalla)
    routes drawn right away                     → checkpoints → trip cached, weather estimate
-Progress ── GET /api/trips/<id>/plan/ ──────►  weather at each ETA (Open-Meteo, HRRR + GFS)
+         ── GET /api/trips/<id>/ (polled) ──►  the last route, found in the background
+Progress ── GET /api/trips/<id>/plan/ ──────►  weather at each ETA (NOAA HRRR + GFS grids)
    retries with backoff if partial             → risk → ranking → leave-later → heatmap
 RouteComparison · MapView · ForecastSlider
 ```
@@ -91,6 +120,11 @@ Routing takes 2–20 seconds and the weather a few more. Splitting the work lets
 on the map in seconds while the weather loads, with an honest time estimate (the server knows how
 many forecast points it still has to download). The browser stays usable the whole time, so a job
 queue wasn't needed.
+
+The third route can take most of the routing time (the penalty rounds below), so the first request
+returns as soon as the engine's first answer is in. The routes it has go on the map straight away;
+a background thread finds the rest and the page polls `GET /api/trips/<id>/` once a second until
+they're all there, then asks for the weather.
 
 ### Three routes, always
 
@@ -196,7 +230,7 @@ on every push.
 
 One Docker image (`Dockerfile`): Node builds the React app, then Django serves it and the API from the
 same origin through WhiteNoise (pre-compressed, immutable-cached assets). It runs on a single AWS EC2
-`t4g.micro` behind Caddy for HTTPS; see [`deploy/ec2/`](deploy/ec2/). A dedicated IP matters here:
+`t4g.micro` behind Caddy for HTTPS; see [`deploy/ec2/`](deploy/ec2/), and [`deploy/terraform/`](deploy/terraform/) for the AWS resources. A dedicated IP matters here:
 Open-Meteo's free tier is limited per IP, and shared hosting IPs (tried on Render first) were already
 over the limit. CI runs the tests, lint and build on every push.
 

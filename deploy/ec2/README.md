@@ -12,9 +12,14 @@ Secrets: the optional paid Open-Meteo key lives in SSM Parameter Store as the Se
 `/truck-routing/open-meteo-api-key`; `deploy.sh` reads it on each deploy (the instance role may read
 that one parameter only). Without it the app runs on the free tier.
 
+The AWS resources are defined in [`../terraform`](../terraform/README.md).
+
 Redeploy after pushing to `main`:
 
 ```bash
 aws ssm send-command --instance-ids <instance-id> --document-name AWS-RunShellScript \
   --parameters 'commands=["/opt/deploy.sh"]'
 ```
+
+The walkthrough video page is `walkthrough/index.html`, served by Caddy at `/walkthrough`. The
+video (`/opt/walkthrough/walkthrough.mp4` on the host) is copied there by hand, not kept in git.

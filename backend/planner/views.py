@@ -44,12 +44,25 @@ def create_trip(request):
 
 
 @api_view(["GET"])
+def trip_detail(request, trip_id: str):
+    """Step 1, polled: the routes found so far, until `routes_complete`."""
+    try:
+        return Response(planner.trip_summary(planner.load_trip(trip_id)))
+    except planner.TripNotFound as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(["GET"])
 def trip_plan(request, trip_id: str):
     """Step 2: weather risk at each checkpoint's ETA, the recommendation, departure window and heatmap."""
     try:
-        return Response(planner.plan_trip(planner.load_trip(trip_id)))
+        trip = planner.load_trip(trip_id)
     except planner.TripNotFound as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_404_NOT_FOUND)
+    if not trip.routes_complete:
+        return Response({"detail": "Still finding routes; try again in a moment."}, status=status.HTTP_409_CONFLICT)
+    try:
+        return Response(planner.plan_trip(trip))
     except UpstreamError as exc:
         return _upstream_failed(exc)
 

@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, createTrip, getPlan, type Plan, type PlanRequest, type Trip } from "./api";
+import { ApiError, createTrip, getPlan, getTrip, type Plan, type PlanRequest, type Trip } from "./api";
 
 // Exponential backoff for filling in weather the free API couldn't send yet.
 const RETRY_BASE_S = 5;
 const RETRY_MAX_S = 60;
 const MAX_RETRIES = 5;
+
+// While the server finds the last route(s), the first ones are already on the map.
+const ROUTE_POLL_MS = 1000;
+const ROUTE_POLL_MAX = 120;
 
 export type Phase = "idle" | "routing" | "weather" | "done";
 
@@ -52,12 +56,21 @@ function readyNotice(plan: Plan, partial: boolean, wasRetry: boolean): string {
 }
 
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function newRoutesNotice(before: Trip, after: Trip): string | null {
+  const added = after.routes.filter((r) => !before.routes.some((b) => b.id === r.id));
+  if (added.length === 0) return null;
+  return added.map((r) => `${r.name} found (${r.via}).`).join(" ");
+}
+
 export function backoffSeconds(attempt: number, retryAfterS?: number): number {
   return Math.min(retryAfterS ?? RETRY_BASE_S * 2 ** (attempt - 1), RETRY_MAX_S);
 }
 
 /**
- * The two-step flow: routes first (fast), then weather (slower). If the weather
+ * The two-step flow: routes first (fast), then weather (slower). Routes are shown as
+ * they come: the first ones at once, the last one when the server finds it. If the weather
  * comes back incomplete or rate-limited, retry in the background with backoff.
  * Each retry only downloads what is still missing (the server caches the rest),
  * and the fuller plan replaces the old one without resetting the user's view.
@@ -127,9 +140,19 @@ export function usePlanner() {
       const ctrl = new AbortController();
       controller.current = ctrl;
       try {
-        const trip = await createTrip(req, ctrl.signal);
+        let trip = await createTrip(req, ctrl.signal);
         if (run.current !== runId) return;
-        setState((s) => ({ ...s, phase: "weather", trip, weatherStartedAt: Date.now() }));
+        const first = trip;
+        for (let polls = 0; !trip.routes_complete; polls++) {
+          setState((s) => ({ ...s, trip }));
+          if (polls >= ROUTE_POLL_MAX) throw new Error("Finding the last route took too long. Try again.");
+          await sleep(ROUTE_POLL_MS);
+          if (run.current !== runId) return;
+          trip = await getTrip(trip.id, ctrl.signal);
+          if (run.current !== runId) return;
+        }
+        const notice = newRoutesNotice(first, trip);
+        setState((s) => ({ ...s, phase: "weather", trip, weatherStartedAt: Date.now(), notice: notice ?? s.notice }));
         await fetchPlan(trip.id, 1, runId);
       } catch (e) {
         if (run.current !== runId || ctrl.signal.aborted) return;

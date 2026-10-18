@@ -15,6 +15,11 @@ const retry = (over: Partial<Retry> = {}): Retry => ({
 });
 
 describe("Progress", () => {
+  it("while the last route is searched, says the first ones are already on the map", () => {
+    render(<Progress phase="routing" routesFound={2} estimatedS={null} startedAt={null} retry={null} onRetryNow={() => {}} />);
+    expect(screen.getByText(/2 routes are on the map/)).toBeInTheDocument();
+  });
+
   it("shows an honest time estimate while the weather loads, and that the map is usable", () => {
     render(<Progress phase="weather" estimatedS={20} startedAt={Date.now()} retry={null} onRetryNow={() => {}} />);
     expect(screen.getByText(/about 20 s left/)).toBeInTheDocument();
