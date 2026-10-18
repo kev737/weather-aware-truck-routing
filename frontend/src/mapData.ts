@@ -58,26 +58,28 @@ export function routeLabels(routes: MapRoute[]): FC {
   };
 }
 
-export function riskSegments(route: RouteOption | undefined): FC {
-  if (!route) return empty;
+/** Every route's risk-coloured stretches, tagged with the route; a filter shows the selected one. */
+export function riskSegments(routes: MapRoute[]): FC {
   return {
     type: "FeatureCollection",
-    features: route.segments.map((s) => ({
-      type: "Feature",
-      properties: { risk: s.risk },
-      geometry: { type: "LineString", coordinates: s.coordinates },
-    })),
+    features: routes.filter(hasRisk).flatMap((r) =>
+      r.segments.map((s) => ({
+        type: "Feature" as const,
+        properties: { route: r.id, risk: s.risk },
+        geometry: { type: "LineString" as const, coordinates: s.coordinates },
+      })),
+    ),
   };
 }
 
-/** Checkpoints of every route; `selected` decides which layer draws them. */
-export function checkpointPoints(routes: MapRoute[], selectedId: string | null): FC {
+/** Checkpoints of every route; filters on `route` decide which layer draws them. */
+export function checkpointPoints(routes: MapRoute[]): FC {
   return {
     type: "FeatureCollection",
     features: routes.filter(hasRisk).flatMap((r) =>
       r.checkpoints.map((c, i) => ({
         type: "Feature" as const,
-        properties: { route: r.id, i, risk: c.risk, selected: r.id === selectedId },
+        properties: { route: r.id, i, risk: c.risk },
         geometry: { type: "Point" as const, coordinates: [c.lon, c.lat] },
       })),
     ),

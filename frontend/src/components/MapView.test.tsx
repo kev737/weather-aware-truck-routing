@@ -11,6 +11,9 @@ type Call = [string, ...unknown[]];
 const calls: Call[] = [];
 const sources = new Map<string, { data: unknown; setData: (d: unknown) => void }>();
 let loadHandler: (() => void) | null = null;
+const layerHandlers = new Map<string, (e: unknown) => void>(); // "mousemove:routes" -> handler
+let clickHandler: ((e: unknown) => void) | null = null;
+let hits: Record<string, Record<string, unknown>[]> = {}; // layer -> features under the cursor
 
 vi.mock("maplibre-gl", () => {
   class FakeMap {
@@ -18,6 +21,11 @@ vi.mock("maplibre-gl", () => {
     addControl() {}
     on(event: string, ...args: unknown[]) {
       if (event === "load") loadHandler = args[0] as () => void;
+      else if (event === "click" && typeof args[0] === "function") clickHandler = args[0] as (e: unknown) => void;
+      else if (typeof args[0] === "string") layerHandlers.set(`${event}:${args[0]}`, args[1] as (e: unknown) => void);
+    }
+    queryRenderedFeatures(_point: unknown, opts: { layers: string[] }) {
+      return opts.layers.flatMap((l) => (hits[l] ?? []).map((properties) => ({ properties })));
     }
     addSource(id: string) {
       const src = { data: null as unknown, setData: (d: unknown) => { src.data = d; calls.push(["setData", id, d]); } };
@@ -32,6 +40,9 @@ vi.mock("maplibre-gl", () => {
     }
     setPaintProperty(layer: string, prop: string, value: unknown) {
       calls.push(["paint", layer, prop, value]);
+    }
+    setFilter(layer: string, filter: unknown) {
+      calls.push(["filter", layer, filter]);
     }
     setLayoutProperty(layer: string, prop: string, value: unknown) {
       calls.push(["layout", layer, prop, value]);
@@ -58,7 +69,9 @@ vi.mock("maplibre-gl", () => {
     setLngLat() { return this; }
     setHTML() { return this; }
     addTo() { return this; }
-    remove() {}
+    remove() {
+      calls.push(["popup-removed"]);
+    }
   }
   const NavigationControl = class {};
   return { default: { Map: FakeMap, LngLatBounds, Popup, NavigationControl }, Map: FakeMap };
@@ -68,7 +81,6 @@ const { MapView } = await import("./MapView");
 
 async function mount(props: Partial<Parameters<typeof MapView>[0]> = {}) {
   const p = plan();
-  fixtureRoutes = p.routes;
   const all = { tripId: "t1", routes: p.routes, selectedId: "A", onSelect: () => {}, heatmap: p.heatmap, hour: 0, showHeatmap: true, ...props };
   const view = render(<MapView {...all} />);
   await act(async () => {
@@ -79,11 +91,13 @@ async function mount(props: Partial<Parameters<typeof MapView>[0]> = {}) {
 }
 
 const of = (kind: string) => calls.filter((c) => c[0] === kind);
-let fixtureRoutes = plan().routes;
 
 beforeEach(() => {
   calls.length = 0;
   sources.clear();
+  layerHandlers.clear();
+  clickHandler = null;
+  hits = {};
   loadHandler = null;
 });
 
@@ -148,11 +162,67 @@ describe("MapView", () => {
     expect(of("fitBounds")).toHaveLength(2);
   });
 
-  it("selecting another route moves the risk colours to it", async () => {
+  it("closes an open checkpoint popup when another route is selected", async () => {
+    const { view, props } = await mount();
+    const removed = () => of("popup-removed").length;
+    hits = { checkpoints: [{ route: "A", i: 0 }] };
+    act(() => clickHandler!({ point: [0, 0], lngLat: [-100, 30] }));
+    const before = removed();
+    view.rerender(<MapView {...props} selectedId="B" />);
+    await act(async () => await Promise.resolve());
+    expect(removed()).toBe(before + 1);
+  });
+
+  it("a click on the selected route's checkpoint opens it, even where another route runs underneath", async () => {
+    const onSelect = vi.fn();
+    await mount({ onSelect });
+    hits = { checkpoints: [{ route: "A", i: 0 }], routes: [{ id: "B" }], "checkpoints-other": [{ route: "B" }] };
+    act(() => clickHandler!({ point: [0, 0], lngLat: [-100, 30] }));
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("a click on another route selects it, but not on a stretch shared with the selected route", async () => {
+    const onSelect = vi.fn();
+    await mount({ onSelect });
+    hits = { routes: [{ id: "B" }] };
+    act(() => clickHandler!({ point: [0, 0], lngLat: [-100, 30] }));
+    expect(onSelect).toHaveBeenCalledWith("B");
+    onSelect.mockClear();
+    hits = { routes: [{ id: "B" }, { id: "A" }] }; // A is selected and runs here too
+    act(() => clickHandler!({ point: [0, 0], lngLat: [-100, 30] }));
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("a letter marker always switches, even on top of the selected route's line", async () => {
+    const onSelect = vi.fn();
+    await mount({ onSelect });
+    hits = { "labels-bg": [{ id: "C" }], routes: [{ id: "A" }, { id: "C" }] };
+    act(() => clickHandler!({ point: [0, 0], lngLat: [-100, 30] }));
+    expect(onSelect).toHaveBeenCalledWith("C");
+  });
+
+  it("draws the selected route and its badge on top where routes overlap", async () => {
     const { view, props } = await mount();
     view.rerender(<MapView {...props} selectedId="B" />);
     await act(async () => await Promise.resolve());
+    const onTop = ["case", ["==", ["get", "id"], "B"], 1, 0];
+    const last = (layer: string, prop: string) => of("layout").filter((c) => c[1] === layer && c[2] === prop).pop()?.[3];
+    expect(last("routes", "line-sort-key")).toEqual(onTop);
+    expect(last("labels-bg", "circle-sort-key")).toEqual(onTop);
+    expect(last("labels", "symbol-sort-key")).toEqual(onTop);
+  });
+
+  it("selecting another route moves the risk colours to it without re-uploading any data", async () => {
+    const { view, props } = await mount();
+    const uploads = of("setData").length;
+    view.rerender(<MapView {...props} selectedId="B" />);
+    await act(async () => await Promise.resolve());
+    expect(of("setData")).toHaveLength(uploads); // only filters and paint changed
+    const lastFilter = (layer: string) => of("filter").filter((c) => c[1] === layer).pop()?.[2];
+    expect(lastFilter("segments")).toEqual(["==", ["get", "route"], "B"]);
+    expect(lastFilter("checkpoints")).toEqual(["==", ["get", "route"], "B"]);
+    expect(lastFilter("checkpoints-other")).toEqual(["!=", ["get", "route"], "B"]);
     const segs = sources.get("segments")!.data as GeoJSON.FeatureCollection;
-    expect(segs.features).toEqual(fixtureRoutes[1].segments.map((s) => expect.objectContaining({ properties: { risk: s.risk } })));
+    expect(new Set(segs.features.map((f) => f.properties?.route))).toEqual(new Set(["A", "B", "C"])); // all uploaded once
   });
 });

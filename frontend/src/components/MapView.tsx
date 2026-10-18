@@ -1,4 +1,4 @@
-import maplibregl, { type ExpressionSpecification, type GeoJSONSource, type MapLayerMouseEvent } from "maplibre-gl";
+import maplibregl, { type ExpressionSpecification, type FilterSpecification, type GeoJSONSource, type MapLayerMouseEvent } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { useEffect, useRef } from "react";
 import type { Heatmap } from "../api";
@@ -46,6 +46,7 @@ export function MapView({ tripId, routes, selectedId, onSelect, heatmap, hour, s
   onSelectRef.current = onSelect;
   const routesRef = useRef(routes);
   routesRef.current = routes;
+  const popupRef = useRef<maplibregl.Popup | null>(null);
   const selectedRef = useRef(selectedId);
   selectedRef.current = selectedId;
 
@@ -55,9 +56,9 @@ export function MapView({ tripId, routes, selectedId, onSelect, heatmap, hour, s
     m.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     map.current = m;
     const hover = new maplibregl.Popup({ closeButton: false, closeOnClick: false, className: "map-tip" });
-    let popup: maplibregl.Popup | null = null; // the open checkpoint popup, if any
+    const popup = popupRef; // the open checkpoint popup, if any
     const closeOnEscape = (e: KeyboardEvent) => {
-      if (e.key === "Escape") popup?.remove(); // keyboard users can dismiss it too
+      if (e.key === "Escape") popup.current?.remove(); // keyboard users can dismiss it too
     };
     window.addEventListener("keydown", closeOnEscape);
 
@@ -87,7 +88,7 @@ export function MapView({ tripId, routes, selectedId, onSelect, heatmap, hour, s
           id: "checkpoints-other",
           type: "circle",
           source: "checkpoints",
-          filter: ["==", ["get", "selected"], false],
+          filter: ["==", ["get", "route"], ""], // set to "not the selected route" below
           paint: {
             "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 2, 9, 4],
             "circle-color": riskColorExpr,
@@ -112,7 +113,7 @@ export function MapView({ tripId, routes, selectedId, onSelect, heatmap, hour, s
           id: "checkpoints",
           type: "circle",
           source: "checkpoints",
-          filter: ["==", ["get", "selected"], true],
+          filter: ["==", ["get", "route"], ""], // set to the selected route below
           paint: {
             "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 3, 9, 6],
             "circle-color": riskColorExpr,
@@ -139,14 +140,36 @@ export function MapView({ tripId, routes, selectedId, onSelect, heatmap, hour, s
           const id = props?.id ?? props?.route; // route lines/badges carry `id`, checkpoints `route`
           return routesRef.current.find((r) => r.id === id);
         };
-        for (const layer of ["routes", "labels-bg", "checkpoints-other"]) {
-          m.on("click", layer, (e) => {
-            const r = routeAt(e);
-            if (r) onSelectRef.current(r.id);
-          });
+        const ROUTE_LAYERS = ["labels-bg", "checkpoints-other", "routes"];
+        const hitsAt = (point: maplibregl.PointLike, layers: string[]) =>
+          m.queryRenderedFeatures(point, { layers }).map((f) => f.properties);
+
+        // One handler for every click, so a click where things overlap does one thing:
+        // the selected route's checkpoint opens its popup; its line does nothing. To switch,
+        // click a letter marker, or a grey route's line or dots (not a stretch it shares
+        // with the selected route).
+        m.on("click", (e) => {
+          const cp = hitsAt(e.point, ["checkpoints"])[0];
+          const route = routesRef.current.find((r) => r.id === selectedRef.current);
+          if (cp && route && hasRisk(route)) {
+            popup.current?.remove();
+            popup.current = new maplibregl.Popup({ className: "map-tip" })
+              .setLngLat(e.lngLat)
+              .setHTML(checkpointPopup(route.checkpoints[cp.i]))
+              .addTo(m);
+            return;
+          }
+          const badge = hitsAt(e.point, ["labels-bg"])[0]?.id; // a letter marker always switches
+          if (badge && badge !== selectedRef.current) return onSelectRef.current(badge);
+          // A grey line or dot switches, unless the selected route runs there too.
+          const ids = hitsAt(e.point, ["checkpoints-other", "routes"]).map((p) => p?.id ?? p?.route);
+          if (ids.length && !ids.includes(selectedRef.current)) onSelectRef.current(ids[0]);
+        });
+
+        for (const layer of ROUTE_LAYERS) {
           m.on("mousemove", layer, (e) => {
             const r = routeAt(e);
-            if (!r) return;
+            if (!r || hitsAt(e.point, ["checkpoints"]).length) return; // a checkpoint has its own popup
             m.getCanvas().style.cursor = "pointer";
             hover.setLngLat(e.lngLat).setHTML(routeTooltip(r)).addTo(m);
           });
@@ -155,16 +178,6 @@ export function MapView({ tripId, routes, selectedId, onSelect, heatmap, hour, s
             hover.remove();
           });
         }
-        m.on("click", "checkpoints", (e) => {
-          const route = routesRef.current.find((r) => r.id === selectedRef.current);
-          const i = e.features?.[0]?.properties?.i;
-          if (!route || !hasRisk(route) || i === undefined) return;
-          popup?.remove();
-          popup = new maplibregl.Popup({ className: "map-tip" })
-            .setLngLat(e.lngLat)
-            .setHTML(checkpointPopup(route.checkpoints[i]))
-            .addTo(m);
-        });
 
         m.on("mouseenter", "checkpoints", () => (m.getCanvas().style.cursor = "pointer"));
         m.on("mouseleave", "checkpoints", () => (m.getCanvas().style.cursor = ""));
@@ -177,21 +190,45 @@ export function MapView({ tripId, routes, selectedId, onSelect, heatmap, hour, s
     };
   }, []);
 
-  // New or fuller data, or another route selected: swap the data without touching the camera.
+  // New or fuller data: upload every route's lines, segments and checkpoints once, without
+  // touching the camera.
+  useEffect(() => {
+    ready.current?.then(() => {
+      const m = map.current!;
+      (m.getSource("routes") as GeoJSONSource).setData(routeLines(routes));
+      (m.getSource("labels") as GeoJSONSource).setData(routeLabels(routes));
+      (m.getSource("segments") as GeoJSONSource).setData(riskSegments(routes));
+      (m.getSource("checkpoints") as GeoJSONSource).setData(checkpointPoints(routes));
+    });
+  }, [routes]);
+
+  // A checkpoint popup belongs to the route it was opened on: close it when another route is
+  // selected, so it can't seem to describe that route's checkpoint at the same spot.
+  useEffect(() => {
+    popupRef.current?.remove();
+    popupRef.current = null;
+  }, [selectedId]);
+
+  // Another route selected: only filters, paint and draw order change, so nothing is re-uploaded.
   useEffect(() => {
     ready.current?.then(() => {
       const m = map.current!;
       const selected = routes.find((r) => r.id === selectedId);
-      const risky = selected && hasRisk(selected) ? selected : undefined;
-      (m.getSource("routes") as GeoJSONSource).setData(routeLines(routes));
-      (m.getSource("labels") as GeoJSONSource).setData(routeLabels(routes));
-      (m.getSource("segments") as GeoJSONSource).setData(riskSegments(risky));
-      (m.getSource("checkpoints") as GeoJSONSource).setData(checkpointPoints(routes, selectedId));
-      // Before the weather arrives, show the selected route in blue so it still stands out.
-      const isSelected = ["==", ["get", "id"], selectedId ?? ""] as ExpressionSpecification;
+      const risky = Boolean(selected && hasRisk(selected));
+      const sel = selectedId ?? "";
+      const ofSelected = ["==", ["get", "route"], sel] as FilterSpecification;
+      for (const layer of ["segments-casing", "segments", "checkpoints"]) m.setFilter(layer, ofSelected);
+      m.setFilter("checkpoints-other", ["!=", ["get", "route"], sel]);
+      // Before the weather arrives, show the selected route in teal so it still stands out.
+      const isSelected = ["==", ["get", "id"], sel] as ExpressionSpecification;
       m.setPaintProperty("routes", "line-color", risky ? "#868e96" : ["case", isSelected, "#008080", "#868e96"]);
       m.setPaintProperty("routes", "line-width", ["case", isSelected, 6, 4]);
       m.setPaintProperty("labels-bg", "circle-color", ["case", isSelected, "#008080", "#343a40"]);
+      // Where routes overlap, the selected one (and its badge) is drawn last, on top.
+      const onTop = ["case", isSelected, 1, 0] as ExpressionSpecification;
+      m.setLayoutProperty("routes", "line-sort-key", onTop);
+      m.setLayoutProperty("labels-bg", "circle-sort-key", onTop);
+      m.setLayoutProperty("labels", "symbol-sort-key", onTop);
     });
   }, [routes, selectedId]);
 

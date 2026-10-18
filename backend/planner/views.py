@@ -13,10 +13,14 @@ log = logging.getLogger(__name__)
 
 RETRY_AFTER_S = 60
 
+# How the third-party services are named to customers; the technical detail goes to the log.
+SERVICE_NAMES = {"routing": "the route planner", "geocoding": "place search", "weather": "the weather service"}
+
 
 def _upstream_failed(exc: UpstreamError) -> Response:
     log.warning("upstream failure: %s", exc)
-    body = {"detail": f"The {exc.service} service failed: {exc.message}"}
+    name = SERVICE_NAMES.get(exc.service, "a service we use")
+    body = {"detail": f"We couldn't reach {name} just now. Please try again in a minute."}
     if isinstance(exc, QuotaExhausted):
         # No retry_after: the browser shouldn't keep trying until the quota resets.
         body["detail"] = exc.message[0].upper() + exc.message[1:]
@@ -24,6 +28,7 @@ def _upstream_failed(exc: UpstreamError) -> Response:
         return Response(body, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     if isinstance(exc, RateLimited):
         wait = exc.retry_after_s or RETRY_AFTER_S
+        body["detail"] = f"{name[0].upper()}{name[1:]} is busy. Trying again in about {wait} s."
         body["retry_after_s"] = wait
         return Response(body, status=status.HTTP_503_SERVICE_UNAVAILABLE, headers={"Retry-After": str(wait)})
     return Response(body, status=status.HTTP_502_BAD_GATEWAY)
@@ -36,7 +41,11 @@ def create_trip(request):
     s.is_valid(raise_exception=True)
     try:
         _, summary = planner.create_trip(planner.TripRequest(**s.validated_data))
-    except (geocoding.PlaceNotFound, planner.SamePlace, routing.NoRoute) as exc:
+    except geocoding.PlaceNotFound as exc:
+        return Response({exc.field or "detail": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
+    except planner.SamePlace as exc:
+        return Response({"destination": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
+    except routing.NoRoute as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     except UpstreamError as exc:
         return _upstream_failed(exc)

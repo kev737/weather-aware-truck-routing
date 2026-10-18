@@ -10,8 +10,14 @@ afterEach(() => vi.restoreAllMocks());
 
 describe("API errors", () => {
   it("shows the server's message, without raw field names", async () => {
-    reply(400, { departure: ["Departure can't be in the past."] });
-    await expect(getPlan("t1")).rejects.toThrow("Departure can't be in the past.");
+    reply(400, { departure: ["That time has passed. Pick a departure from now on."] });
+    await expect(getPlan("t1")).rejects.toThrow("That time has passed. Pick a departure from now on.");
+  });
+
+  it("keeps each field's message so the form can show it next to the field", async () => {
+    reply(400, { destination: ['We couldn\'t find "Daytn".'], load_lb: ["Enter 0 to 80,000 lb."] });
+    const err = (await getPlan("t1").catch((e) => e)) as ApiError;
+    expect(err.fields).toEqual({ destination: 'We couldn\'t find "Daytn".', load_lb: "Enter 0 to 80,000 lb." });
   });
 
   it("knows when the daily weather quota is used up (so it won't retry)", async () => {

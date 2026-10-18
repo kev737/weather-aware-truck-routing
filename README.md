@@ -62,7 +62,8 @@ Sources: [ATRI operating costs (FleetOwner)](https://www.fleetowner.com/operatio
 [Becker et al. 2022, weather and crash types incl. trucks](https://link.springer.com/article/10.1186/s12544-022-00561-2),
 [FHWA truck braking on wet pavement](https://www.fhwa.dot.gov/reports/tswstudy/TSWwp5.pdf).
 
-Two rules sit above the score, both cautious:
+When two scores tie to the minute, the brief's own order decides: fewer Severe miles, then fewer
+High miles, then lower average risk, then shorter travel time. Two rules sit above the score, both cautious:
 
 - **No Travel miles always lose**: a route you're told not to drive is never recommended while
   another route avoids it; if none does, nothing is recommended.

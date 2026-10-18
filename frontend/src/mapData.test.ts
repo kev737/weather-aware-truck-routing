@@ -26,15 +26,18 @@ describe("routes on the map", () => {
     expect(fc.features[0].geometry).toEqual(p.routes[0].geometry);
   });
 
-  it("colours the selected route by risk along its length", () => {
+  it("colours each route by risk along its length, tagged so a filter can pick the selected one", () => {
     const r = route("B", 33, {
       segments: [
         { risk: "low", from_mi: 0, to_mi: 300, coordinates: [[-100, 33], [-97, 33]] },
         { risk: "severe", from_mi: 300, to_mi: 600, coordinates: [[-97, 33], [-94, 33]] },
       ],
     });
-    const fc = riskSegments(r);
-    expect(fc.features.map((f) => f.properties?.risk)).toEqual(["low", "severe"]);
+    const fc = riskSegments([r]);
+    expect(fc.features.map((f) => f.properties)).toEqual([
+      { route: "B", risk: "low" },
+      { route: "B", risk: "severe" },
+    ]);
     // The colour rule maps each risk level to its legend colour, grey when there's no forecast.
     expect(riskColorExpr).toEqual(expect.arrayContaining(["severe", RISK_COLOR.severe, "no_travel", RISK_COLOR.no_travel]));
   });
@@ -50,13 +53,11 @@ describe("routes on the map", () => {
 });
 
 describe("checkpoints on the map", () => {
-  it("shows the checkpoints of every route, with their risk, the selected route's emphasised", () => {
+  it("shows the checkpoints of every route, with their risk and route", () => {
     const p = plan();
-    const fc = checkpointPoints(p.routes, "B");
+    const fc = checkpointPoints(p.routes);
     expect(fc.features).toHaveLength(p.routes.reduce((n, r) => n + r.checkpoints.length, 0));
     const byRoute = (id: string) => fc.features.filter((f) => f.properties?.route === id);
-    expect(byRoute("B").every((f) => f.properties?.selected)).toBe(true);
-    expect(byRoute("A").some((f) => f.properties?.selected)).toBe(false);
     expect(byRoute("B").map((f) => f.properties?.risk)).toEqual(["low", "severe"]);
   });
 

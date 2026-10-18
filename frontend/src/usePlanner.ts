@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, createTrip, getPlan, getTrip, type Plan, type PlanRequest, type Trip } from "./api";
+import { ApiError, createTrip, getPlan, getTrip, type FieldErrors, type Plan, type PlanRequest, type Trip } from "./api";
 
 // Exponential backoff for filling in weather the free API couldn't send yet.
 const RETRY_BASE_S = 5;
@@ -28,6 +28,7 @@ export interface PlannerState {
   weatherStartedAt: number | null; // epoch ms, for the progress bar
   retry: Retry | null;
   error: string | null;
+  fieldErrors: FieldErrors; // shown next to the form fields they belong to
   notice: string | null; // short "it's ready" message for the toast
 }
 
@@ -38,6 +39,7 @@ const initial: PlannerState = {
   weatherStartedAt: null,
   retry: null,
   error: null,
+  fieldErrors: {},
   notice: null,
 };
 
@@ -156,7 +158,9 @@ export function usePlanner() {
         await fetchPlan(trip.id, 1, runId);
       } catch (e) {
         if (run.current !== runId || ctrl.signal.aborted) return;
-        setState({ ...initial, error: (e as Error).message });
+        const fields = e instanceof ApiError ? e.fields : {};
+        if (Object.keys(fields).length) setState({ ...initial, fieldErrors: fields });
+        else setState({ ...initial, error: (e as Error).message });
       }
     },
     [fetchPlan],

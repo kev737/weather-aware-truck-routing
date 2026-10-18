@@ -84,6 +84,7 @@ body {
   display: grid;
   grid-template-columns: 1fr 120px;
   gap: 8px;
+  align-items: start; /* an error under one field doesn't push the other one down */
 }
 
 .field {
@@ -107,6 +108,52 @@ body {
 .field input:focus {
   outline: 2px solid var(--highlight);
   outline-offset: -1px;
+}
+
+.field input[aria-invalid="true"] {
+  border-color: rgb(255 135 135 / 0.7);
+}
+
+.field input[aria-invalid="true"]:focus {
+  outline-color: var(--error);
+}
+
+/* Errors sit with the field they belong to, in the error colour, and fade in. */
+.field-error {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: var(--error);
+  animation: field-error-in 0.15s ease-out;
+}
+
+.field-error-icon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  margin-top: 1px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #1a0d0d;
+  background: var(--error);
+  border-radius: 50%;
+}
+
+@keyframes field-error-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .field-error {
+    animation: none;
+  }
 }
 
 .suggest-list {
@@ -179,10 +226,14 @@ button.primary:disabled {
 }
 
 .error {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
   margin: 12px 0 0;
-  padding: 10px;
-  font-size: 0.9rem;
-  color: var(--error);
+  padding: 10px 12px;
+  font-size: 0.88rem;
+  line-height: 1.4;
+  color: var(--text);
   background: rgb(255 107 107 / 0.1);
   border: 1px solid rgb(255 107 107 / 0.35);
   border-radius: var(--radius);

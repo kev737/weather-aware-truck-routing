@@ -108,13 +108,22 @@ def _timed(route: Route, interval_mi: int) -> list[TimedCheckpoint]:
     return [TimedCheckpoint(s, s.seconds, weather.exact(s.point)) for s in sample_checkpoints(route, interval_mi)]
 
 
+def _resolved(future, field: str) -> Place:
+    """The geocoded place, or PlaceNotFound saying which form field it came from."""
+    try:
+        return future.result()
+    except geocoding.PlaceNotFound as exc:
+        exc.field = field
+        raise
+
+
 def create_trip(req: TripRequest) -> tuple[Trip, dict]:
     with ThreadPoolExecutor(max_workers=2) as pool:
         origin_f = pool.submit(geocoding.resolve, req.origin)
         dest_f = pool.submit(geocoding.resolve, req.destination)
-        origin, dest = origin_f.result(), dest_f.result()
+        origin, dest = _resolved(origin_f, "origin"), _resolved(dest_f, "destination")
     if haversine_mi((origin.lat, origin.lon), (dest.lat, dest.lon)) < SAME_PLACE_MI:
-        raise SamePlace("Origin and destination are the same place. Pick two different places.")
+        raise SamePlace("Start and destination are the same place. Pick two different places.")
 
     found, finish = routing.start_routes((origin.lat, origin.lon), (dest.lat, dest.lon), req.load_lb)
     trip = _build_trip(uuid.uuid4().hex, req, origin, dest, found, complete=finish is None)
@@ -330,7 +339,9 @@ def _departure_window(trip: Trip, table: RiskTable) -> dict | None:
         "no_travel_mi": round(best.no_travel_mi, 1),
         "severe_mi": round(best.severe_mi, 1),
         "high_mi": round(best.high_mi, 1),
-        "reason": explain(best, best_now).replace("on the next option", "if you leave at your chosen time"),
+        "reason": explain(best, best_now)
+        .replace("than the next option", "than leaving at your chosen time")
+        .replace("on the next option", "if you leave at your chosen time"),
     }
 
 

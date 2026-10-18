@@ -27,6 +27,7 @@ COUNTRY_SCORE = {"US": 2.0, "CA": 1.0, "MX": 1.0}
 
 
 class PlaceNotFound(ValueError):
+    field: str | None = None  # "origin" or "destination", set by the caller
     pass
 
 
@@ -110,5 +111,5 @@ def resolve(value: str | dict) -> Place:
         return Place(value.get("name") or f"{value['lat']:.4f}, {value['lon']:.4f}", value["lat"], value["lon"])
     places = search(value, limit=1)
     if not places:
-        raise PlaceNotFound(f'No place found for "{value}".')
+        raise PlaceNotFound(f'We couldn\'t find "{value}". Try adding the state, like "Dayton, OH".')
     return places[0]

@@ -22,6 +22,9 @@ One hazard alone works out at about 0.8 min per Moderate mile, 2.2 per High mile
 and 10 per Severe mile, so 30 extra minutes buys avoiding 3 Severe miles. Severe
 wind in High rain is 30x the crash rate, about 32 min per mile.
 
+When two scores tie to the minute, the brief's own order decides: fewer Severe miles,
+then fewer High miles, then lower average risk, then shorter travel time.
+
 Two rules sit above the score, both cautious:
 - No Travel miles always lose: a route you're told not to drive is never better.
 - Miles with no forecast come next: missing data never makes a route look safer.
@@ -108,18 +111,30 @@ def score_route(route_id: str, legs: Iterable[tuple], duration_s: float) -> Rout
     return RouteScore(route_id, miles_by_level, avg, duration_s, unknown, risk_min)
 
 
+def _brief_order(score: RouteScore) -> tuple[float, ...]:
+    """The brief's preferences, used to break ties: Severe miles, High miles, average risk."""
+    return (round(score.severe_mi, MILES_PRECISION), round(score.high_mi, MILES_PRECISION), round(score.avg_risk, 2))
+
+
 def sort_key(score: RouteScore) -> tuple[float, ...]:
-    """No Travel miles, then miles without a forecast, then the score (to the minute)."""
+    """No Travel miles, miles without a forecast, the score (to the minute), then the brief's order."""
     return (
         round(score.no_travel_mi, MILES_PRECISION),
         round(score.unknown_mi, MILES_PRECISION),
         round(score.score_h * 60),
+        *_brief_order(score),
+        round(score.duration_s / 60),
     )
 
 
 def risk_key(score: RouteScore) -> tuple[float, ...]:
     """The same, without travel time: is one option *safer* than another?"""
-    return (round(score.no_travel_mi, MILES_PRECISION), round(score.unknown_mi, MILES_PRECISION), round(score.risk_min))
+    return (
+        round(score.no_travel_mi, MILES_PRECISION),
+        round(score.unknown_mi, MILES_PRECISION),
+        round(score.risk_min),
+        *_brief_order(score),
+    )
 
 
 def rank(scores: list[RouteScore]) -> list[RouteScore]:
@@ -154,6 +169,13 @@ def explain(best: RouteScore, runner_up: RouteScore | None) -> str:
     if safer_min > 0:
         lead = f"{-slower_min} min faster and less" if slower_min < 0 else "Less"
         return f"{lead} weather risk than the next option ({_risk_words(best)} vs {_risk_words(runner_up)})."
+    if slower_min < 0 and safer_min < 0:
+        return (
+            f"{-slower_min} min faster than the next option, worth more than its {-safer_min} min of extra weather "
+            f"({_risk_words(best)} vs {_risk_words(runner_up)})."
+        )
     if slower_min < 0:
         return f"Same weather exposure as the next option, and {-slower_min} min faster."
+    if _brief_order(best) != _brief_order(runner_up):
+        return f"Same score as the next option; wins on the brief's order ({_risk_words(best)} vs {_risk_words(runner_up)})."
     return "Ties with the next option; kept the routing API's first choice."

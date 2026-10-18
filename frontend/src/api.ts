@@ -117,17 +117,31 @@ export interface PlanRequest {
   interval_mi: 10 | 25 | 50;
 }
 
+/** The form fields the server can point an error at. */
+export type FormField = keyof PlanRequest;
+export type FieldErrors = Partial<Record<FormField, string>>;
+
 export class ApiError extends Error {
   readonly status: number; // 0 = network error
   readonly retryAfterS?: number; // set when the server says to wait (rate limit)
   readonly quotaExhausted: boolean; // daily quota used up: don't retry today
+  readonly fields: FieldErrors; // messages that belong next to a form field
 
-  constructor(message: string, status: number, retryAfterS?: number, quotaExhausted = false) {
+  constructor(message: string, status: number, retryAfterS?: number, quotaExhausted = false, fields: FieldErrors = {}) {
     super(message);
     this.status = status;
     this.retryAfterS = retryAfterS;
     this.quotaExhausted = quotaExhausted;
+    this.fields = fields;
   }
+}
+
+/** DRF's {field: [messages]} errors, first message per field. */
+function fieldErrors(body: unknown): FieldErrors {
+  if (!body || typeof body !== "object" || "detail" in body) return {};
+  return Object.fromEntries(
+    Object.entries(body as Record<string, unknown>).map(([k, msgs]) => [k, String(([] as unknown[]).concat(msgs)[0])]),
+  );
 }
 
 function describe(body: unknown): string {
@@ -149,7 +163,9 @@ async function call<T>(url: string, init?: RequestInit): Promise<T> {
     throw new ApiError("Can't reach the server. Check your connection and try again.", 0);
   }
   const body = await resp.json().catch(() => null);
-  if (!resp.ok) throw new ApiError(describe(body), resp.status, body?.retry_after_s, Boolean(body?.quota_exhausted));
+  if (!resp.ok) {
+    throw new ApiError(describe(body), resp.status, body?.retry_after_s, Boolean(body?.quota_exhausted), fieldErrors(body));
+  }
   return body as T;
 }
 

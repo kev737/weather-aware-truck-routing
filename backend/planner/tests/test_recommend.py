@@ -76,6 +76,21 @@ def test_each_mile_counts_once_in_its_own_level():
     assert (s.severe_mi, s.no_travel_mi) == (10, 5)
 
 
+def test_equal_scores_fall_back_to_the_briefs_order():
+    """1 Severe mile and 4.5 High miles are worth the same minutes; the brief prefers fewer Severe."""
+    severe = score_route("A", [(L, 100), (S, 1)], 5 * HOUR)
+    high = score_route("B", [(L, 100), (H, 4.5)], 5 * HOUR)
+    assert round(severe.score_h * 60) == round(high.score_h * 60)
+    assert ids([severe, high]) == ["B", "A"]
+    assert explain(high, severe).startswith("Same score as the next option; wins on the brief's order")
+
+
+def test_differences_under_a_minute_are_a_tie():
+    a = score_route("A", [(L, 100)], 5 * HOUR + 20)  # 20 s slower: same score to the minute
+    b = score_route("B", [(L, 100)], 5 * HOUR)
+    assert ids([a, b]) == ["A", "B"]  # within a minute it's a tie: routing order stays
+
+
 def test_full_tie_keeps_routing_order():
     a = score_route("A", [(L, 100)], HOUR)
     b = score_route("B", [(L, 100)], HOUR)
@@ -100,6 +115,15 @@ def test_explain_states_the_trade_off():
     e = score_route("E", [(L, 100), (N, 1)], HOUR)
     assert explain(c, e).startswith("Avoids No Travel conditions")
     assert explain(c, None) == "Only one route was available."
+
+
+def test_explain_says_when_the_faster_route_carries_a_little_more_weather():
+    faster = score_route("A", [(L, 100), (H, 18)], 2.65 * HOUR)  # 40 min of weather
+    slower = score_route("B", [(L, 100), (H, 15)], 3.07 * HOUR)  # 34 min of weather, 25 min slower
+    assert ids([faster, slower]) == ["A", "B"]
+    assert explain(faster, slower) == (
+        "25 min faster than the next option, worth more than its 7 min of extra weather (18 High mi vs 15 High mi)."
+    )
 
 
 def test_explain_names_moderate_miles_when_they_decide():

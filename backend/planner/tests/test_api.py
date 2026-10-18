@@ -134,7 +134,7 @@ def test_upstream_failure_is_a_clear_502(monkeypatch, fakes):
     monkeypatch.setattr(routing, "start_routes", boom)
     resp = post(body())
     assert resp.status_code == 502
-    assert "no truck route" in resp.json()["detail"]
+    assert resp.json()["detail"] == "We couldn't reach the route planner just now. Please try again in a minute."
 
 
 class PassingStorm:
@@ -170,6 +170,7 @@ def test_waiting_out_a_storm_is_suggested(monkeypatch, fakes):
     assert window["delay_h"] == 5  # the first departure that misses the storm entirely
     assert window["no_travel_mi"] == 0
     assert window["route_id"] == "A"  # all routes are clear then, so the fastest wins
+    assert "next option" not in window["reason"]  # compared with leaving on time, not with another route
 
 
 def test_no_window_when_waiting_does_not_help(fakes):
@@ -253,10 +254,25 @@ def test_rate_limit_with_no_data_is_a_503_with_retry_after(monkeypatch, fakes):
     assert resp.json()["retry_after_s"] == 60
 
 
+def test_a_place_that_cannot_be_found_is_reported_on_its_field(monkeypatch, fakes):
+    from planner.services.geocoding import PlaceNotFound
+
+    def resolve(value):
+        if value == "Nowhereville":
+            raise PlaceNotFound('We couldn\'t find "Nowhereville". Try adding the state, like "Dayton, OH".')
+        return fake_resolve(value)
+
+    monkeypatch.setattr("planner.services.geocoding.resolve", resolve)
+    resp = APIClient().post("/api/trips/", body(destination="Nowhereville"), format="json")
+    assert resp.status_code == 400
+    assert list(resp.json()) == ["destination"]
+    assert resp.json()["destination"][0].startswith('We couldn\'t find "Nowhereville"')
+
+
 def test_same_origin_and_destination_is_rejected(fakes):
     resp = APIClient().post("/api/trips/", body(destination="Amarillo, TX"), format="json")
     assert resp.status_code == 400
-    assert "same place" in resp.json()["detail"]
+    assert "same place" in resp.json()["destination"][0]  # shown under the To field
 
 
 def test_unroutable_places_are_a_clear_400(monkeypatch, fakes):
@@ -266,7 +282,7 @@ def test_unroutable_places_are_a_clear_400(monkeypatch, fakes):
     monkeypatch.setattr(routing, "start_routes", no_route)
     resp = APIClient().post("/api/trips/", body(destination="Honolulu, HI"), format="json")
     assert resp.status_code == 400
-    assert "across water" in resp.json()["detail"]
+    assert "no truck route" in resp.json()["detail"].lower()
 
 
 @pytest.mark.parametrize("interval", [10, 25, 50])

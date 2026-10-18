@@ -1,11 +1,13 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { searchPlaces, type Place } from "../api";
+import { FieldError } from "./FieldError";
 
 interface Props {
   label: string;
   value: string | Place;
   onChange: (value: string | Place) => void;
   placeholder?: string;
+  error?: string; // shown under the input
 }
 
 /**
@@ -13,7 +15,7 @@ interface Props {
  * gives exact coordinates. The list sits in the page flow (it pushes the form down)
  * so it can never cover the Plan button; arrow keys, Enter and Escape work.
  */
-export function PlaceInput({ label, value, onChange, placeholder }: Props) {
+export function PlaceInput({ label, value, onChange, placeholder, error }: Props) {
   const text = typeof value === "string" ? value : value.name;
   const [suggestions, setSuggestions] = useState<Place[]>([]);
   const [open, setOpen] = useState(false);
@@ -21,6 +23,7 @@ export function PlaceInput({ label, value, onChange, placeholder }: Props) {
   const picked = useRef(false);
   const typed = useRef(false); // no lookups for the prefilled values, only once the user types
   const listId = useId();
+  const errorId = useId();
 
   useEffect(() => {
     if (!typed.current || picked.current || text.trim().length < 3) {
@@ -91,8 +94,10 @@ export function PlaceInput({ label, value, onChange, placeholder }: Props) {
         aria-expanded={showList}
         aria-controls={listId}
         aria-activedescendant={active >= 0 ? `${listId}-${active}` : undefined}
-        required
+        aria-invalid={Boolean(error)}
+        aria-describedby={error ? errorId : undefined}
       />
+      <FieldError id={errorId} message={error} />
       {showList && (
         <ul className="suggest-list" role="listbox" id={listId}>
           {suggestions.map((p, i) => (

@@ -33,6 +33,7 @@ export default function App() {
         </h1>
         <TripForm
           loading={phase === "routing" || phase === "weather"}
+          serverErrors={planner.fieldErrors}
           onSubmit={(req) => {
             setPickedId(null);
             planner.submit(req);
@@ -46,12 +47,15 @@ export default function App() {
           retry={planner.retry}
           onRetryNow={planner.retryNow}
         />
-        <RouteComparison routes={routes} plan={plan} selectedId={selectedId} onSelect={setPickedId} />
         {planner.error && (
-          <p className="error" role="alert">
-            {planner.error}
-          </p>
+          <div className="error" role="alert">
+            <span className="field-error-icon" aria-hidden="true">
+              !
+            </span>
+            <span>{planner.error}</span>
+          </div>
         )}
+        <RouteComparison routes={routes} plan={plan} selectedId={selectedId} onSelect={setPickedId} />
       </aside>
       <main className="map-area">
         <MapView

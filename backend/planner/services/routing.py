@@ -137,7 +137,9 @@ def _post(points: list[LatLon], load_lb: float, alternates: int, avoid: list[Lat
         data = post_json(session(), "routing", f"{settings.VALHALLA_URL}/route", json=body)
     except UpstreamError as exc:
         if any(e in exc.message for e in _NO_ROUTE_ERRORS):
-            raise NoRoute("No truck route connects these places. Is one of them across water?") from exc
+            raise NoRoute(
+                "There's no truck route between these places. If one is on an island, try a nearby place on the mainland."
+            ) from exc
         raise
     return [data["trip"]] + [alt["trip"] for alt in data.get("alternates", [])]
 
