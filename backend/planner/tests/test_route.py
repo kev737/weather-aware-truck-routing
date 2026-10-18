@@ -102,14 +102,14 @@ def test_route_without_keeps_time_consistent():
     assert cut.duration_s == pytest.approx(route.duration_s - (route.cum_s[40] - route.cum_s[20]))
 
 
-def test_split_points_are_skeleton_vertices_about_600_mi_apart():
+def test_split_points_are_skeleton_vertices_about_780_mi_apart():
     from planner.services.routing import split_points
 
     skeleton = [destination((35.0, -80.0), 270, m) for m in range(0, 2001, 50)]  # 2000 mi due west
     points = split_points(skeleton)
     assert points[0] == skeleton[0] and points[-1] == skeleton[-1]
     assert all(p in skeleton for p in points)  # never invents a point off the road
-    assert len(points) == 5  # splits at 600, 1200, 1800 mi
+    assert len(points) == 4  # splits at 800 and 1600 mi (the first vertices past 780 and 1560)
 
 
 def test_numbered_road_names_win_over_local_names():
@@ -142,3 +142,12 @@ def test_route_names_prefer_numbered_highways():
     a = r({"I 35": 200, "Pan Am Expressway": 60})
     b = r({"TX 220": 150, "US 281": 120, "Main Street": 30})
     assert distinguishing_names([a, b]) == ["I 35", "TX 220 / US 281"]
+
+
+def test_thin_by_distance_keeps_ends_and_spacing():
+    from planner.domain.geo import thin_by_distance
+
+    cum = [i * 0.1 for i in range(101)]  # 10 miles, a vertex every 0.1 mi
+    idx = thin_by_distance(cum, 1.0)
+    assert idx[0] == 0 and idx[-1] == 100
+    assert len(idx) == 11  # one per mile, plus the end

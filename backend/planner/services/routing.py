@@ -23,7 +23,8 @@ from datetime import datetime
 from django.conf import settings
 from django.core.cache import cache
 
-from ..domain.geo import LatLon, bearing_deg, decode_polyline, destination, haversine_mi, point_at, simplify
+from ..domain.geo import LatLon, bearing_deg, decode_polyline, destination, haversine_mi, point_at, thin_by_distance
+from ..domain.borders import foreign_stretch, into_us, outside_us, vias_inside_us
 from ..domain.route import NUMBERED_ROAD, Route
 from .http import UpstreamError, get_json, post_json, session
 
@@ -35,7 +36,14 @@ LB_PER_TONNE = 2204.62
 
 # The public server's limit is 1,500 km of straight-line distance per request; stay under it.
 MAX_REQUEST_MI = 800
-SPLIT_EVERY_MI = 600  # road miles between split points on a long trip
+SPLIT_EVERY_MI = 780  # road miles between split points (under the 800 straight-line limit)
+# A border crossing's cost in the route choice (not in the ETA). For a trip with one end
+# abroad it's customs, ~2 h. Between two US points we don't want one at all (passports,
+# paperwork, and many domestic loads can't legally go through Canada): Valhalla's maximum
+# penalty (12 h; larger values are silently ignored) helps, and `_stay_in_us` makes sure.
+BORDER_PENALTY_S = 2 * 3600
+DOMESTIC_BORDER_PENALTY_S = 12 * 3600
+MAX_BORDER_REROUTES = 2
 CHUNK_WORKERS = 4  # parallel leg requests; modest, it's a free public server
 
 # An alternative is only worth showing if most of it is on different roads and it isn't absurdly long.
@@ -109,10 +117,16 @@ def _location(point: LatLon, kind: str) -> dict:
 
 def _post(points: list[LatLon], load_lb: float, alternates: int, avoid: list[LatLon] = ()) -> list[dict]:
     kinds = ["break"] + ["through"] * (len(points) - 2) + ["break"]
+    domestic = not (outside_us(points[0]) or outside_us(points[-1]))
     body = {
         "locations": [_location(p, k) for p, k in zip(points, kinds)],
         "costing": "truck",
-        "costing_options": {"truck": {"weight": gross_weight_tonnes(load_lb)}},
+        "costing_options": {
+            "truck": {
+                "weight": gross_weight_tonnes(load_lb),
+                "country_crossing_penalty": DOMESTIC_BORDER_PENALTY_S if domestic else BORDER_PENALTY_S,
+            }
+        },
         "alternates": alternates,
         "units": "miles",
         "directions_type": "maneuvers",
@@ -168,7 +182,10 @@ def _chunks(points: list[LatLon]) -> list[list[LatLon]]:
         hop = haversine_mi(a, b)
         pieces = math.ceil(hop / MAX_REQUEST_MI)
         heading = bearing_deg(a, b)
-        dense.extend(destination(a, heading, hop * i / pieces) for i in range(1, pieces))
+        between = [destination(a, heading, hop * i / pieces) for i in range(1, pieces)]
+        if not (outside_us(a) or outside_us(b)):  # a domestic hop: its added points stay domestic too
+            between = [into_us(p) for p in between]
+        dense.extend(between)
         dense.append(b)
 
     chunks, current = [], [dense[0]]
@@ -187,6 +204,45 @@ def _near_chunk(avoid: list[LatLon], chunk: list[LatLon], margin_mi: float = 100
     return [p for p in avoid if min(haversine_mi(p, c) for c in chunk) <= span / 2 + margin_mi]
 
 
+def _shape(trip: dict) -> list[LatLon]:
+    return [p for leg in trip["legs"] for p in decode_polyline(leg["shape"], precision=6)]
+
+
+def _insert_in_order(points: list[LatLon], via: LatLon) -> list[LatLon]:
+    """`points` with `via` placed between the waypoints it lies between (by distance from the start)."""
+    d = haversine_mi(points[0], via)
+    k = next((i for i in range(1, len(points)) if haversine_mi(points[0], points[i]) > d), len(points) - 1)
+    return [*points[:k], via, *points[k:]]
+
+
+def _stay_in_us(points: list[LatLon], load_lb: float, alternates: int, avoid: list[LatLon]) -> list[dict]:
+    """Valhalla trips through `points`; for a domestic leg, rerouted until they stay in the US.
+
+    The border penalty doesn't always hold (the public server's border data isn't consistent
+    at every crossing), so we check the result ourselves: if part of it runs abroad, route
+    again through a point just inside the US level with that stretch.
+    """
+    trips = _post(points, load_lb, alternates, avoid)
+    if outside_us(points[0]) or outside_us(points[-1]):
+        return trips  # a cross-border trip has to cross
+    main = trips[0]
+    for _ in range(MAX_BORDER_REROUTES):
+        stretch = foreign_stretch(_shape(main))
+        if stretch is None:
+            break
+        for via in vias_inside_us(_shape(main), stretch):
+            try:
+                candidate = _post(_insert_in_order(points, via), load_lb, 0, avoid)[0]
+            except UpstreamError:
+                continue  # no road near this point (a lake): try one further inside
+            points, main = _insert_in_order(points, via), candidate
+            break
+        else:
+            break  # no via worked: keep the best we have
+    domestic_alts = [t for t in trips[1:] if foreign_stretch(_shape(t)) is None]
+    return [main, *domestic_alts]
+
+
 def request_routes(
     points: list[LatLon], load_lb: float, alternates: int, avoid: list[LatLon] = ()
 ) -> list[Route]:
@@ -194,14 +250,14 @@ def request_routes(
     chunks = _chunks(points)
     if len(chunks) == 1:
         routes = []
-        for trip in _post(points, load_lb, alternates, list(avoid)):
+        for trip in _stay_in_us(points, load_lb, alternates, list(avoid)):
             path = _Path()
             path.extend(trip)
             routes.append(path.to_route())
         return routes
     # The legs don't depend on each other: fetch them in parallel, then join in order.
     with ThreadPoolExecutor(max_workers=CHUNK_WORKERS) as pool:
-        trips = list(pool.map(lambda c: _post(c, load_lb, 0, _near_chunk(list(avoid), c))[0], chunks))
+        trips = list(pool.map(lambda c: _stay_in_us(c, load_lb, 0, _near_chunk(list(avoid), c))[0], chunks))
     path = _Path()
     joints = []
     for trip in trips:
@@ -253,7 +309,7 @@ class _Footprint:
     CELL_DEG = 0.02  # about 1.4 mi
 
     def __init__(self, route: Route):
-        self.cells = {self._cell(p) for p in simplify(route.coords, 0.5)}
+        self.cells = {self._cell(route.coords[k]) for k in thin_by_distance(route.cum_mi, 0.5)}
 
     def _cell(self, p: LatLon) -> tuple[int, int]:
         return int(p[0] // self.CELL_DEG), int(p[1] // self.CELL_DEG)
@@ -318,7 +374,13 @@ def _first_routes(origin: LatLon, dest: LatLon, load_lb: float) -> tuple[list[Ro
             return []
 
     # One truck route per skeleton, built in parallel (each is several Valhalla requests).
-    plans = [split_points([origin, *skeleton[1:-1], dest]) for skeleton in osrm_skeletons(origin, dest)]
+    # OSRM's car routes may cut through Canada; on a domestic trip, keep the split points
+    # inside the US so the truck route doesn't cross the border twice for nothing.
+    domestic = not (outside_us(origin) or outside_us(dest))
+    plans = []
+    for skeleton in osrm_skeletons(origin, dest):
+        points = split_points([origin, *skeleton[1:-1], dest])
+        plans.append([points[0], *(into_us(p) if domestic else p for p in points[1:-1]), points[-1]])
     with ThreadPoolExecutor(max_workers=3) as pool:
         results = list(pool.map(truck_route, plans))
     routes = [r for found in results for r in found]

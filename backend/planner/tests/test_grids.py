@@ -42,11 +42,25 @@ def test_gfs_three_hourly_steps_cover_the_hours_between(box):
     assert all(v is not None for v in series)
 
 
-def test_only_the_two_newest_runs_are_kept(box):
+def test_only_the_newest_run_is_kept(box):
     for k in range(4):
         write_run("gfs", RUN + timedelta(hours=6 * k), range(0, 2), box, wind=k)
     runs = sorted(p.name for p in (G._root() / "gfs").iterdir())
-    assert runs == ["2026101900", "2026101906"]
+    assert runs == ["2026101906"]
+
+
+def test_the_freshest_hrrr_run_wins_for_the_hours_it_covers(box):
+    write_run("hrrr", RUN, range(0, 6), box, wind=30)  # 6-hourly run from 12z
+    write_run("hrrr_hourly", RUN + timedelta(hours=2), range(0, 2), box, wind=45)  # 14z hourly run: 14z-15z
+    series = G.Grids.current().hourly(31.0, -99.0, RUN, 5)
+    assert [v[0] for v in series] == [30, 30, 45, 45, 30]  # 14z-15z from the fresher run
+    assert {v[4] for v in series} == {"hrrr"}  # both are HRRR to the user
+
+
+def test_a_download_that_would_fill_the_disk_is_skipped(box, monkeypatch):
+    monkeypatch.setattr(G, "MIN_FREE_BYTES", 10**18)
+    with pytest.raises(G.DiskTooFull):
+        write_run("gfs", RUN, range(0, 2), box, wind=1)
 
 
 def test_weather_uses_the_grids_and_says_which_model(box, settings):
@@ -86,3 +100,11 @@ def test_lambert_projection_round_trip():
     p = G.Lambert(21.138123, 237.280472 - 360, 262.5 - 360, 38.5, 38.5, 38.5, 3000.0, 3000.0, 1799, 1059)
     assert p.index(21.138123, 237.280472 - 360) == (0, 0)
     assert p.index(48.85, 2.35) is None  # Paris is off the grid
+
+
+def test_runs_are_stored_point_major_and_read_the_same(box):
+    write_run("gfs", RUN, range(0, 4), box, wind=12)
+    run = G.Grids.current().runs["gfs"]
+    assert run.point_major and run.arrays["wind"].shape == (3, 3, 4)  # rows, cols, hours
+    assert list(run.series(31.0, -99.0)["wind"]) == [12, 12, 12, 12]
+    assert not list((G._root() / "gfs").glob("*/*.hours.npy"))  # the hour-major copy is gone

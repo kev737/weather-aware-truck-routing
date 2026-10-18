@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from django.core.cache import cache
 from django.utils import timezone
 
-from ..domain.geo import haversine_mi, point_at, simplify
+from ..domain.geo import haversine_mi, point_at, thin_by_distance
 from ..domain.recommend import RouteScore, explain, rank, risk_key, score_route, sort_key
 from ..domain.risk import Assessment, assess, risk_index
 from ..domain.route import Route, Sample, distinguishing_names, sample_checkpoints
@@ -133,7 +133,7 @@ def load_trip(trip_id: str) -> Trip:
 def _display_coords(route: Route) -> list[list[float]]:
     """[lon, lat] pairs thinned to ~3000 points; plenty for a web map at any zoom."""
     step = max(route.distance_mi / 3000, 0.05)
-    return [[round(lon, 5), round(lat, 5)] for lat, lon in simplify(route.coords, step)]
+    return [[round(route.coords[k][1], 5), round(route.coords[k][0], 5)] for k in thin_by_distance(route.cum_mi, step)]
 
 
 def _route_summary(trip: Trip, rid: str) -> dict:

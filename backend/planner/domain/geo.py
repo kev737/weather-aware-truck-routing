@@ -5,6 +5,8 @@ import bisect
 import math
 from collections.abc import Sequence
 
+import numpy as np
+
 LatLon = tuple[float, float]
 
 EARTH_RADIUS_MI = 3958.8
@@ -93,13 +95,18 @@ def interpolate(xs: Sequence[float], ys: Sequence[float], x: float) -> float:
     return ys[i - 1] + t * (ys[i] - ys[i - 1])
 
 
-def simplify(coords: Sequence[LatLon], min_step_mi: float) -> list[LatLon]:
-    """Drop vertices closer than `min_step_mi` to the last kept one (keeps the ends)."""
-    if len(coords) <= 2:
-        return list(coords)
-    kept = [coords[0]]
-    for c in coords[1:-1]:
-        if haversine_mi(kept[-1], c) >= min_step_mi:
-            kept.append(c)
-    kept.append(coords[-1])
-    return kept
+def thin_by_distance(cum_mi: Sequence[float], step_mi: float) -> list[int]:
+    """Indices of vertices about `step_mi` apart along the line (always the first and last).
+
+    Uses the line's cumulative miles, so it's one vectorised pass instead of a
+    distance computation per vertex.
+    """
+    cum = np.asarray(cum_mi)
+    if len(cum) <= 2 or step_mi <= 0:
+        return list(range(len(cum)))
+    bucket = np.floor(cum / step_mi)
+    keep = np.flatnonzero(np.diff(bucket, prepend=-1) > 0)
+    idx = keep.tolist()
+    if idx[-1] != len(cum) - 1:
+        idx.append(len(cum) - 1)
+    return idx

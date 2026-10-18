@@ -31,7 +31,8 @@ cat > /etc/systemd/system/truck-grids.service <<'UNIT'
 Description=Refresh NOAA forecast grids for the truck-routing app
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/docker exec app python manage.py refresh_grids
+# Background priority: a reviewer's request always comes before decoding forecasts.
+ExecStart=/usr/bin/docker exec app nice -n 19 python manage.py refresh_grids
 UNIT
 cat > /etc/systemd/system/truck-grids.timer <<'UNIT'
 [Unit]

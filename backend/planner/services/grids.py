@@ -1,7 +1,8 @@
 """NOAA forecast grids, downloaded by a job and read locally: no per-point limits.
 
-- HRRR (3 km, hourly, 0-48 h) from NOAA's AWS mirror: the only free model that
-  simulates thunderstorms directly, so it's used wherever it reaches.
+- HRRR (3 km) from NOAA's AWS mirror: the only free model that simulates
+  thunderstorms directly, so it's used wherever it reaches. Its hourly runs
+  (0-18 h, at most ~2 h old) come first, then the 6-hourly runs (0-48 h).
 - GFS (13 km "sflux", hourly to 120 h, 3-hourly to 240 h) for later hours, the
   continental-US box cut out by NOAA's GRIB filter. It has no gusts (shown as
   unknown); the risk rules use sustained wind anyway.
@@ -31,8 +32,14 @@ log = logging.getLogger(__name__)
 MPH_PER_MS = 2.23694
 MM_PER_IN = 25.4  # 1 kg/m^2 of water = 1 mm
 SNOW_TO_LIQUID = 10  # standard 10:1 snow-to-water ratio
-KEEP_RUNS = 2
+KEEP_RUNS = 1  # the new run is complete before the old one goes; open readers keep working
+MIN_FREE_BYTES = 3 * 1024**3  # never let a download fill the disk
 HRRR_HOURS = 48
+# HRRR runs every hour out to 18 h, and every 6 h (00/06/12/18z) out to 48 h. We keep both:
+# the hourly run is fresher for the next 18 hours, the 6-hourly one reaches further.
+HRRR_MODELS = {"hrrr_hourly": (18, 1), "hrrr": (HRRR_HOURS, 6)}  # model -> (hours, runs every N h)
+LOOKUP_ORDER = ("hrrr_hourly", "hrrr", "gfs")  # freshest storm-resolving forecast first
+SOURCE = {"hrrr_hourly": "hrrr", "hrrr": "hrrr", "gfs": "gfs"}  # what the popup names
 GFS_HOURS = list(range(0, 121)) + list(range(123, 241, 3))
 CONUS = {"toplat": 50, "bottomlat": 24, "leftlon": -125, "rightlon": -66}
 FIELDS = ("wind", "gust", "rain", "snow")  # what we store, per hour, in the brief's units
@@ -189,31 +196,62 @@ def _fields(u, v, gust, precip_mm_hr, cpofp) -> dict[str, np.ndarray]:
 # --- Writing a run ---------------------------------------------------------------
 
 
+class DiskTooFull(RuntimeError):
+    pass
+
+
 class _RunWriter:
-    """Builds one run's arrays in a temp folder, then publishes it atomically."""
+    """Builds one run's arrays in a temp folder, then publishes it atomically.
+
+    The download arrives an hour at a time (one US-wide sheet per hour), but trips read one
+    point's whole forecast, so on publish the arrays are rewritten point-major: shape
+    (rows, cols, hours), each point's hours next to each other on disk. A cold read of a
+    checkpoint is then one small read instead of one per hour.
+    """
+
+    BLOCK_ROWS = 64  # rows rewritten at a time when publishing (~10 MB of memory)
 
     def __init__(self, model: str, run: datetime, valid: list[datetime], shape: tuple[int, int]):
+        need = 2 * len(valid) * shape[0] * shape[1] * 2 * len(FIELDS)  # float16, hour- and point-major
+        free = shutil.disk_usage(_root().parent if _root().exists() else Path(settings.CACHE_DIR)).free
+        if free - need < MIN_FREE_BYTES:
+            raise DiskTooFull(f"{model}: {need / 1e9:.1f} GB needed, {free / 1e9:.1f} GB free; skipping this run")
         self.model, self.run = model, run
         self.tmp = _root() / model / f".{run:%Y%m%d%H}.partial"
         shutil.rmtree(self.tmp, ignore_errors=True)
         self.tmp.mkdir(parents=True)
         self.valid = valid
+        self.shape = shape
         self.arrays = {
-            f: np.lib.format.open_memmap(self.tmp / f"{f}.npy", "w+", np.float16, (len(valid), *shape)) for f in FIELDS
+            f: np.lib.format.open_memmap(self.tmp / f"{f}.hours.npy", "w+", np.float16, (len(valid), *shape))
+            for f in FIELDS
         }
 
     def put(self, t: int, fields: dict[str, np.ndarray]) -> None:
         for f in FIELDS:
             self.arrays[f][t] = fields[f].astype(np.float16)
 
+    def _point_major(self, f: str) -> None:
+        hours = self.arrays[f]
+        hours.flush()
+        out = np.lib.format.open_memmap(self.tmp / f"{f}.npy", "w+", np.float16, (*self.shape, len(self.valid)))
+        for r in range(0, self.shape[0], self.BLOCK_ROWS):
+            out[r : r + self.BLOCK_ROWS] = np.moveaxis(np.asarray(hours[:, r : r + self.BLOCK_ROWS]), 0, -1)
+        out.flush()
+        del out
+        self.arrays[f] = None
+        del hours
+        (self.tmp / f"{f}.hours.npy").unlink()
+
     def publish(self, projection) -> None:
-        for a in self.arrays.values():
-            a.flush()
+        for f in FIELDS:
+            self._point_major(f)
         meta = {
             "model": self.model,
             "run": self.run.isoformat(),
             "valid": [t.isoformat() for t in self.valid],
             "projection": projection.as_dict(),
+            "layout": "point-major",
         }
         (self.tmp / "meta.json").write_text(json.dumps(meta))
         final = _root() / self.model / f"{self.run:%Y%m%d%H}"
@@ -258,26 +296,27 @@ def _idx_ranges(text: str, wanted: tuple[str, ...]) -> list[tuple[int, int | Non
     return out
 
 
-def latest_hrrr_run(s: requests.Session, now: datetime) -> datetime | None:
-    """Newest 00/06/12/18z run whose 48-hour file is already published."""
+def latest_hrrr_run(s: requests.Session, now: datetime, hours: int = HRRR_HOURS, every: int = 6) -> datetime | None:
+    """Newest run (one every `every` hours) whose last forecast hour is already published."""
     t = now.replace(minute=0, second=0, microsecond=0)
-    t -= timedelta(hours=t.hour % 6)
-    for _ in range(8):
-        url = HRRR_URL.format(d=t, h=HRRR_HOURS) + ".idx"
+    t -= timedelta(hours=t.hour % every)
+    for _ in range(max(8, 12 // every)):
+        url = HRRR_URL.format(d=t, h=hours) + ".idx"
         if s.head(url, timeout=30).status_code == 200:
             return t
-        t -= timedelta(hours=6)
+        t -= timedelta(hours=every)
     return None
 
 
-def refresh_hrrr(s: requests.Session, now: datetime, force: bool = False) -> bool:
+def refresh_hrrr(s: requests.Session, now: datetime, force: bool = False, model: str = "hrrr") -> bool:
     import eccodes
 
-    run = latest_hrrr_run(s, now)
-    if run is None or (run == _latest_published("hrrr") and not force):
+    hours, every = HRRR_MODELS[model]
+    run = latest_hrrr_run(s, now, hours, every)
+    if run is None or (run == _latest_published(model) and not force):
         return False
     writer = proj = None
-    for h in range(HRRR_HOURS + 1):
+    for h in range(hours + 1):
         url = HRRR_URL.format(d=run, h=h)
         ranges = _idx_ranges(_get(s, url + ".idx").text, _hrrr_wanted(h))
         raw = b"".join(_get(s, url, headers={"Range": f"bytes={a}-{'' if b is None else b}"}).content for a, b in ranges)
@@ -289,8 +328,8 @@ def refresh_hrrr(s: requests.Session, now: datetime, force: bool = False) -> boo
                 by_name[name] = eccodes.codes_get_values(hd).reshape(eccodes.codes_get(hd, "Ny"), eccodes.codes_get(hd, "Nx"))
             if writer is None:
                 proj = Lambert.from_handle(handles[0])
-                valid = [run + timedelta(hours=k) for k in range(HRRR_HOURS + 1)]
-                writer = _RunWriter("hrrr", run, valid, (proj.ny, proj.nx))
+                valid = [run + timedelta(hours=k) for k in range(hours + 1)]
+                writer = _RunWriter(model, run, valid, (proj.ny, proj.nx))
             precip = by_name.get("tp", np.zeros_like(by_name["10u"]))  # APCP decodes as "tp"; none at hour 0
             writer.put(h, _fields(by_name["10u"], by_name["10v"], by_name["gust"], precip, by_name["cpofp"]))
         finally:
@@ -381,9 +420,14 @@ def refresh(now: datetime | None = None, force: bool = False) -> dict[str, bool]
     s = requests.Session()
     s.headers["User-Agent"] = settings.HTTP_USER_AGENT
     out = {}
-    for model, fn in (("hrrr", refresh_hrrr), ("gfs", refresh_gfs)):
+    jobs = {
+        "hrrr_hourly": lambda: refresh_hrrr(s, now, force, "hrrr_hourly"),
+        "hrrr": lambda: refresh_hrrr(s, now, force, "hrrr"),
+        "gfs": lambda: refresh_gfs(s, now, force),
+    }
+    for model, job in jobs.items():
         try:
-            out[model] = fn(s, now, force)
+            out[model] = job()
         except Exception:  # noqa: BLE001 - one model failing must not stop the other
             log.exception("refreshing %s failed", model)
             out[model] = False
@@ -400,6 +444,7 @@ class _Run:
     valid: list[datetime]
     projection: Lambert | LatLon
     arrays: dict[str, np.ndarray]
+    point_major: bool = True  # runs written before the layout change are hour-major
 
     def __post_init__(self):
         self._by_time = {t: k for k, t in enumerate(self.valid)}
@@ -422,6 +467,7 @@ class _Run:
             [datetime.fromisoformat(t) for t in meta["valid"]],
             _projection(meta["projection"]),
             {f: np.load(folder / f"{f}.npy", mmap_mode="r") for f in FIELDS},
+            meta.get("layout") == "point-major",
         )
 
     def series(self, lat: float, lon: float) -> dict[str, np.ndarray] | None:
@@ -429,6 +475,8 @@ class _Run:
         if idx is None:
             return None
         j, i = idx
+        if self.point_major:
+            return {f: np.asarray(a[j, i], dtype=np.float32) for f, a in self.arrays.items()}
         return {f: np.asarray(a[:, j, i], dtype=np.float32) for f, a in self.arrays.items()}
 
 
@@ -441,7 +489,7 @@ class Grids:
     @classmethod
     def current(cls) -> "Grids":
         runs = {}
-        for model in ("hrrr", "gfs"):
+        for model in LOOKUP_ORDER:
             folder = _root() / model
             if folder.exists():
                 done = sorted(p for p in folder.iterdir() if p.is_dir() and not p.name.startswith("."))
@@ -468,10 +516,10 @@ class Grids:
         for k in range(hours):
             when = start + timedelta(hours=k)
             value = None
-            for model in ("hrrr", "gfs"):  # HRRR first: it sees storms
+            for model in LOOKUP_ORDER:  # freshest HRRR first: it sees storms
                 if model in found and (t := found[model][0].step(when)) is not None:
                     series = found[model][1]
-                    value = tuple(float(series[f][t]) for f in FIELDS) + (model,)
+                    value = tuple(float(series[f][t]) for f in FIELDS) + (SOURCE[model],)
                     break
             out.append(value)
         return out

@@ -102,7 +102,15 @@ overlapping candidate up to 2× slower fills the slot. Each route is named by th
 apart from the other two.
 
 Valhalla's public server refuses trips over ~1,500 km in straight line, so long trips are split
-into legs. The split points are vertices of an OSRM route, which keeps them on interstates. (A
+into legs. The split points are vertices of an OSRM route, which keeps them on interstates.
+
+**Domestic trips stay in the US.** Crossing into Canada needs passports and customs, and many US
+loads can't legally go through, but the shortest road often does (Detroit → Buffalo via Ontario,
+Seattle → Maine via the Trans-Canada). Valhalla gets its maximum border penalty (12 h; it silently
+ignores larger values), split points are kept inside a simplified US outline, and because the
+public server's border data doesn't stop every crossing, each leg is checked: any stretch abroad
+is rerouted through a point inside the US level with it (further in if that point is a lake).
+Trips that start or end abroad cross normally, with a 2-hour customs penalty. (A
 straight line between the cities once sent a truck over a mountain pass full of hairpins.)
 
 ### Weather
@@ -110,7 +118,8 @@ straight line between the cities once sent a truck over a mountain pass full of 
 The app reads NOAA's forecast models from its own copy of their grids, so a checkpoint lookup is an
 array index, not an API call, and 10, 25 or 50 mi spacing costs the same on any trip length:
 
-- **HRRR (3 km, hourly, 0–48 h)** wherever it reaches. It's the only free model that simulates
+- **HRRR (3 km)** wherever it reaches: its **hourly runs** for the next 18 hours (so the near-term
+  forecast is at most ~2 hours old), then its 6-hourly runs out to 48 hours. It's the only free model that simulates
   thunderstorms directly: on a Florida evening it showed 0.5–1.1 in/hr bursts at West Palm Beach
   where GFS showed a steady 0.05 in/hr (4.2 vs 0.5 inches over 24 h), the difference between
   Severe / No Travel and Low.
@@ -119,16 +128,16 @@ array index, not an API call, and 10, 25 or 50 mi spacing costs the same on any 
 - A job (`manage.py refresh_grids`, hourly via a systemd timer) downloads each new run, our five
   fields only: 10 m wind, gusts, precipitation rate and frozen share, as byte ranges from NOAA's
   AWS mirror (HRRR) or the continental-US box from NOAA's GRIB filter (GFS). It converts them to the
-  brief's units, turns GFS's 6-hour running averages into hourly rates, and keeps the two newest
-  runs as memory-mapped arrays. Rain is the liquid share of the precipitation rate; snow is the
+  brief's units, turns GFS's 6-hour running averages into hourly rates, and keeps the newest run of
+  each model as memory-mapped arrays (~1.1 GB in all). It runs at background CPU priority, never
+  starts a download that would leave less than 3 GB free, and swaps a new run in only once it's
+  complete. Rain is the liquid share of the precipitation rate; snow is the
   frozen share at the standard 10:1 snow-to-water ratio.
 - HRRR is on a Lambert conformal grid; checkpoints find their cell with the projection formulas
   (verified against the GRIB file's own coordinates: 2,000 of 2,000 random points).
 - Each checkpoint's forecast is read **at that checkpoint** and at the truck's ETA; the popup names
   the model it came from. Points outside the grids (outside the US) fall back to Open-Meteo, paced
   to its free tier (600 lookups a minute), checkpoints first.
-- Only the 00/06/12/18z HRRR runs reach 48 hours, so the newest forecast hour can be up to ~6 hours
-  older than HRRR's hourly runs. Using the hourly runs for the first 18 hours is a next step.
 
 ### Heatmap performance
 
@@ -204,5 +213,7 @@ over the limit. CI runs the tests, lint and build on every push.
   and with it the weather each checkpoint meets. Planning where the driver stops would also let
   the app place the rest where it sits out the worst weather.
 - **Dispatcher-tunable weights**: let a fleet set how many minutes a Severe or High mile is worth.
-- **HRRR's hourly runs** for the first 18 hours (fresher than the 6-hourly 48-hour runs), and
-  **NWS warning polygons** (api.weather.gov) as an official overlay.
+- **NWS warning polygons** (api.weather.gov) as an official overlay.
+- **A self-hosted truck router.** The public Valhalla server answers one request at a time (a new
+  cross-country trip is ~20 requests, ~10 s; repeats are cached), its OpenStreetMap data blocks
+  trucks on the road to Key West, and its border data isn't complete.
